@@ -3,7 +3,7 @@
   "name": "Chat Monitor",
   "version": "1.0.0",
   "description": "Chrome extension for monitoring chat response times.",
-  "permissions": ["scripting", "activeTab", "tabs"],
+  "permissions": ["scripting", "activeTab", "tabs", "storage", "alarms"],
   "action": {
     "default_popup": "popup.html",
     "default_title": "Chat Monitor",
@@ -13,5 +13,15 @@
   },
   "icons": {
     "32": "icon-light-32x32.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*/hc/agent/*", "https://*.zendesk.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
   }
 }

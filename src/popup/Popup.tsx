@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -49,14 +49,72 @@ export function Popup() {
   const [volume, setVolume] = useState([75])
   const [soundType, setSoundType] = useState("chime")
 
+  useEffect(() => {
+    // Request current state from service worker
+    chrome.runtime.sendMessage({ type: 'REQUEST_CURRENT_STATE' }, (response) => {
+      if (response?.metrics) {
+        setBreachedChats(response.metrics.breachedCount)
+        setWarningChats(response.metrics.warningCount)
+      }
+      if (response?.settings) {
+        const s = response.settings
+        setBreachThreshold(s.breachThreshold?.toString() || '60')
+        setWarningThreshold(s.warningThreshold?.toString() || '20')
+        setIsMuted(s.isMuted ?? false)
+        setVolume([s.volume ?? 25])
+        setSoundType(s.soundType ?? 'beep')
+        setIsDarkMode(s.isDarkMode ?? false)
+        setBreachColor(s.breachColor ?? '#ef4444')
+        setWarningColor(s.warningColor ?? '#f59e0b')
+      }
+    })
+
+    // Listen for state updates from service worker
+    const handleMessage = (request: any) => {
+      if (request.type === 'STATE_UPDATE') {
+        setBreachedChats(request.metrics.breachedCount)
+        setWarningChats(request.metrics.warningCount)
+      }
+    }
+
+    chrome.runtime.onMessage.addListener(handleMessage)
+
+    return () => {
+      chrome.runtime.onMessage.removeListener(handleMessage)
+    }
+  }, [])
+
+  useEffect(() => {
+    // Send settings changes to service worker
+    chrome.runtime.sendMessage({
+      type: 'SETTINGS_CHANGED',
+      settings: {
+        breachThreshold: parseInt(breachThreshold) || 60,
+        warningThreshold: parseInt(warningThreshold) || 20,
+        isMuted,
+        volume: volume[0],
+        soundType,
+        isDarkMode,
+        breachColor,
+        warningColor,
+        refreshFrequency: parseInt(refreshFrequency) || 30,
+      },
+    }).catch(() => {})
+  }, [breachThreshold, warningThreshold, isMuted, volume, soundType, isDarkMode, breachColor, warningColor, refreshFrequency])
+
   const handleReset = () => {
     setBreachedChats(0)
     setWarningChats(0)
     setRuntime("00:00:00")
+    chrome.runtime.sendMessage({ type: 'RESET' }).catch(() => {})
   }
 
   const handlePlaySound = () => {
-    console.log("Playing sound:", soundType)
+    chrome.runtime.sendMessage({
+      type: 'PLAY_SOUND',
+      soundType,
+      volume: volume[0],
+    }).catch(() => {})
   }
 
   return (
