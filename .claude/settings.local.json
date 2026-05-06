@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "PowerShell(npm install --no-audit --no-fund 2>&1)"
+    ]
+  }
+}
