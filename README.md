@@ -92,7 +92,3 @@ The extension requests:
 Content scripts run on:
 - `https://*/hc/agent/*`
 - `https://*.zendesk.com/*`
-
-## License
-
-Private project — not currently licensed for public distribution.
