@@ -29,33 +29,23 @@ chrome.storage.local.get('settings', (result) => {
   }
 });
 
-function playSound(soundType, volume) {
-  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  
-  if (audioCtx.state === 'suspended') {
-    audioCtx.resume();
-  }
-
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-  
-  osc.connect(gain);
-  gain.connect(audioCtx.destination);
-  
-  osc.type = 'square';
-  osc.frequency.setValueAtTime(880, audioCtx.currentTime);
-  
-  const normalizedVolume = volume / 100;
-  gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
-  gain.gain.exponentialRampToValueAtTime(normalizedVolume * 0.25, audioCtx.currentTime + 0.02);
-  gain.gain.setValueAtTime(normalizedVolume * 0.25, audioCtx.currentTime + 0.18);
-  gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.22);
-  
-  osc.start();
-  osc.stop(audioCtx.currentTime + 0.23);
+function broadcastSoundAlert(soundType, volume) {
+  console.log('[ServiceWorker] broadcastSoundAlert core logic called', { soundType, volume });
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (tabs.length > 0) {
+      chrome.tabs.sendMessage(tabs[0].id, {
+        type: 'PLAY_SOUND',
+        soundType,
+        volume,
+      }).catch(() => {
+        // Content script might not be ready
+      });
+    }
+  });
 }
 
 function processScan(candidates, timestamp) {
+  console.log('[ServiceWorker] processScan core logic called', { candidateCount: candidates.length, timestamp });
   const seenThisPass = new Set();
   let activeBreaches = 0;
   let activeWarnings = 0;
@@ -84,7 +74,7 @@ function processScan(candidates, timestamp) {
       if (!entry.alerted) {
         entry.alerted = true;
         if (!state.settings.isMuted) {
-          playSound(state.settings.soundType, state.settings.volume);
+          broadcastSoundAlert(state.settings.soundType, state.settings.volume);
         }
       }
     } else if (elapsedSeconds >= state.settings.warningThreshold) {
@@ -139,12 +129,14 @@ function processScan(candidates, timestamp) {
 // Message handlers
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'SCAN_RESULT') {
+    console.log('[ServiceWorker] SCAN_RESULT message received', { candidateCount: request.candidates?.length });
     processScan(request.candidates, request.timestamp);
     sendResponse({ ok: true });
   } else if (request.type === 'SETTINGS_CHANGED') {
+    console.log('[ServiceWorker] SETTINGS_CHANGED message received', request.settings);
     state.settings = { ...state.settings, ...request.settings };
     chrome.storage.local.set({ settings: state.settings });
-    
+
     // Reset alerted flags so sounds can trigger again
     state.activeEntries.forEach((entry) => {
       entry.alerted = false;
@@ -158,9 +150,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     processScan(candidates, Date.now());
     sendResponse({ ok: true });
   } else if (request.type === 'RESET') {
+    console.log('[ServiceWorker] RESET message received');
     state.activeEntries.clear();
     state.metrics = { breachedCount: 0, warningCount: 0, totalHanging: 0 };
-    
+
     chrome.runtime.sendMessage({
       type: 'STATE_UPDATE',
       metrics: state.metrics,
@@ -168,9 +161,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     sendResponse({ ok: true });
   } else if (request.type === 'PLAY_SOUND') {
-    playSound(request.soundType, request.volume);
+    console.log('[ServiceWorker] PLAY_SOUND message received', { soundType: request.soundType, volume: request.volume });
+    broadcastSoundAlert(request.soundType, request.volume);
     sendResponse({ ok: true });
   } else if (request.type === 'REQUEST_CURRENT_STATE') {
+    console.log('[ServiceWorker] REQUEST_CURRENT_STATE message received');
     sendResponse({
       metrics: state.metrics,
       settings: state.settings,

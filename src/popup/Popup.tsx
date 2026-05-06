@@ -103,18 +103,82 @@ export function Popup() {
   }, [breachThreshold, warningThreshold, isMuted, volume, soundType, isDarkMode, breachColor, warningColor, refreshFrequency])
 
   const handleReset = () => {
+    console.log('[Popup] Reset button activated')
     setBreachedChats(0)
     setWarningChats(0)
     setRuntime("00:00:00")
+    console.log('[Popup] Reset core logic: sending RESET message to service worker')
     chrome.runtime.sendMessage({ type: 'RESET' }).catch(() => {})
   }
 
   const handlePlaySound = () => {
+    console.log('[Popup] Play Sound button activated')
+    console.log('[Popup] Play Sound core logic: sending PLAY_SOUND message', { soundType, volume: volume[0] })
     chrome.runtime.sendMessage({
       type: 'PLAY_SOUND',
       soundType,
       volume: volume[0],
     }).catch(() => {})
+  }
+
+  const handleEnabledChange = (checked: boolean) => {
+    console.log('[Popup] Enabled switch activated', { checked })
+    setIsEnabled(checked)
+    console.log('[Popup] Enabled core logic: state updated to', checked)
+  }
+
+  const handleBreachThresholdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log('[Popup] Breach Threshold input activated', { value: e.target.value })
+    setBreachThreshold(e.target.value)
+    console.log('[Popup] Breach Threshold core logic: state updated to', e.target.value)
+  }
+
+  const handleWarningThresholdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log('[Popup] Warning Threshold input activated', { value: e.target.value })
+    setWarningThreshold(e.target.value)
+    console.log('[Popup] Warning Threshold core logic: state updated to', e.target.value)
+  }
+
+  const handleRefreshFrequencyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log('[Popup] Refresh Frequency input activated', { value: e.target.value })
+    setRefreshFrequency(e.target.value)
+    console.log('[Popup] Refresh Frequency core logic: state updated to', e.target.value)
+  }
+
+  const handleMuteChange = (checked: boolean) => {
+    console.log('[Popup] Mute switch activated', { checked })
+    setIsMuted(checked)
+    console.log('[Popup] Mute core logic: state updated to', checked)
+  }
+
+  const handleVolumeChange = (newVolume: number[]) => {
+    console.log('[Popup] Volume slider activated', { volume: newVolume[0] })
+    setVolume(newVolume)
+    console.log('[Popup] Volume core logic: state updated to', newVolume[0])
+  }
+
+  const handleSoundTypeChange = (value: string) => {
+    console.log('[Popup] Sound Type select activated', { value })
+    setSoundType(value)
+    console.log('[Popup] Sound Type core logic: state updated to', value)
+  }
+
+  const handleDarkModeChange = (checked: boolean) => {
+    console.log('[Popup] Dark Mode switch activated', { checked })
+    setIsDarkMode(checked)
+    console.log('[Popup] Dark Mode core logic: state updated to', checked)
+  }
+
+  const handleBreachColorChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log('[Popup] Breach Color picker activated', { value: e.target.value })
+    setBreachColor(e.target.value)
+    console.log('[Popup] Breach Color core logic: state updated to', e.target.value)
+  }
+
+  const handleWarningColorChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log('[Popup] Warning Color picker activated', { value: e.target.value })
+    setWarningColor(e.target.value)
+    console.log('[Popup] Warning Color core logic: state updated to', e.target.value)
   }
 
   return (
@@ -195,7 +259,7 @@ export function Popup() {
                       >
                         {isEnabled ? "On" : "Off"}
                       </span>
-                      <Switch checked={isEnabled} onCheckedChange={setIsEnabled} />
+                      <Switch checked={isEnabled} onCheckedChange={handleEnabledChange} />
                     </div>
                   </div>
                 </div>
@@ -217,7 +281,7 @@ export function Popup() {
                       <Input
                         type="number"
                         value={breachThreshold}
-                        onChange={(e) => setBreachThreshold(e.target.value)}
+                        onChange={handleBreachThresholdChange}
                         className="flex-1 h-9 text-center text-sm border-0 bg-muted/50"
                         min="1"
                       />
@@ -234,7 +298,7 @@ export function Popup() {
                       <Input
                         type="number"
                         value={warningThreshold}
-                        onChange={(e) => setWarningThreshold(e.target.value)}
+                        onChange={handleWarningThresholdChange}
                         className="flex-1 h-9 text-center text-sm border-0 bg-muted/50"
                         min="1"
                       />
@@ -263,7 +327,7 @@ export function Popup() {
                     <Input
                       type="number"
                       value={refreshFrequency}
-                      onChange={(e) => setRefreshFrequency(e.target.value)}
+                      onChange={handleRefreshFrequencyChange}
                       className="w-16 h-9 text-center text-sm border-0 bg-muted/50"
                       min="5"
                       max="300"
@@ -294,7 +358,7 @@ export function Popup() {
                         </p>
                       </div>
                     </div>
-                    <Switch checked={isMuted} onCheckedChange={setIsMuted} />
+                    <Switch checked={isMuted} onCheckedChange={handleMuteChange} />
                   </div>
 
                   {/* Volume Slider */}
@@ -309,7 +373,7 @@ export function Popup() {
                     </div>
                     <Slider
                       value={volume}
-                      onValueChange={setVolume}
+                      onValueChange={handleVolumeChange}
                       max={100}
                       step={1}
                       className="w-full"
@@ -322,7 +386,7 @@ export function Popup() {
                   >
                     <Label className="text-sm font-medium">Sound Type</Label>
                     <div className="flex items-center gap-2">
-                      <Select value={soundType} onValueChange={setSoundType}>
+                      <Select value={soundType} onValueChange={handleSoundTypeChange}>
                         <SelectTrigger className="flex-1 h-9 border-0 bg-muted/50">
                           <SelectValue placeholder="Select sound" />
                         </SelectTrigger>
@@ -371,7 +435,7 @@ export function Popup() {
                         </p>
                       </div>
                     </div>
-                    <Switch checked={isDarkMode} onCheckedChange={setIsDarkMode} />
+                    <Switch checked={isDarkMode} onCheckedChange={handleDarkModeChange} />
                   </div>
 
                   {/* Chat Row Visual Alerts */}
@@ -390,7 +454,7 @@ export function Popup() {
                           <input
                             type="color"
                             value={breachColor}
-                            onChange={(e) => setBreachColor(e.target.value)}
+                            onChange={handleBreachColorChange}
                             className="h-9 w-9 rounded-lg cursor-pointer bg-transparent border-0"
                           />
                           <div
@@ -409,7 +473,7 @@ export function Popup() {
                           <input
                             type="color"
                             value={warningColor}
-                            onChange={(e) => setWarningColor(e.target.value)}
+                            onChange={handleWarningColorChange}
                             className="h-9 w-9 rounded-lg cursor-pointer bg-transparent border-0"
                           />
                           <div

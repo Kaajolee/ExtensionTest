@@ -17,6 +17,7 @@ function isRowUnassigned(row) {
 }
 
 function scanForUnassignedChats() {
+  console.log('[Content] scanForUnassignedChats core logic called');
   const newBadges = document.querySelectorAll('div[data-test-id="status-badge-new"]');
   const openBadges = document.querySelectorAll('div[data-test-id="status-badge-open"]');
 
@@ -64,6 +65,7 @@ function scanForUnassignedChats() {
 }
 
 function applyRowAttributes(updates) {
+  console.log('[Content] applyRowAttributes core logic called', { updateCount: Object.keys(updates).length });
   const rows = window.__chatTrackerRows || new Map();
 
   Object.entries(updates).forEach(([entryId, attrs]) => {
@@ -102,11 +104,42 @@ function cleanupRemovedRows(currentIds) {
   }
 }
 
+function playSound(soundType, volume) {
+  console.log('[Content] playSound core logic called', { soundType, volume });
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+
+  const normalizedVolume = volume / 100;
+  gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(normalizedVolume * 0.25, audioCtx.currentTime + 0.02);
+  gain.gain.setValueAtTime(normalizedVolume * 0.25, audioCtx.currentTime + 0.18);
+  gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.22);
+
+  osc.start();
+  osc.stop(audioCtx.currentTime + 0.23);
+}
+
 // Listen for updates from service worker
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'UPDATE_ROWS') {
+    console.log('[Content] UPDATE_ROWS message received', { updateCount: Object.keys(request.updates).length });
     applyRowAttributes(request.updates);
     cleanupRemovedRows(new Set(Object.keys(request.updates)));
+  } else if (request.type === 'PLAY_SOUND') {
+    console.log('[Content] PLAY_SOUND message received', { soundType: request.soundType, volume: request.volume });
+    playSound(request.soundType, request.volume);
   }
 });
 
