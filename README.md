@@ -1,16 +1,5 @@
 # Zendesk Chat Monitor
 
-A Chrome/Edge extension that monitors unassigned Zendesk chats, displays a countdown timer on each row, and alerts you visually and audibly when chats exceed configurable warning and breach thresholds.
-
-## Features
-
-- **Real-time chat monitoring** — scans Zendesk chat tables every 1 second for unassigned tickets via DOM observation (no API access required)
-- **Visual indicators** — rows show live countdown timers; turn yellow at warning threshold and red at breach
-- **Audio alerts** — configurable beep sound plays when a chat breaches threshold
-- **Customizable popup UI** — adjust thresholds, sound type, volume, mute, dark mode, and breach/warning colors
-- **Persistent settings** — preferences saved across browser sessions via `chrome.storage.local`
-- **Lightweight** — built with performance in mind to avoid slowing down Zendesk's already heavy interface
-
 ## Architecture
 
 ```
