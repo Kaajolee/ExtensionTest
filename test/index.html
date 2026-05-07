@@ -17,23 +17,62 @@
 
   <section class="control-panel">
     <div class="panel-group">
-      <h2>Spawn rows</h2>
-      <button data-action="add-new">+ Add NEW (unassigned)</button>
-      <button data-action="add-open-unassigned">+ Add OPEN (unassigned)</button>
-      <button data-action="add-open-assigned">+ Add OPEN (assigned)</button>
+      <h2>Spawn one</h2>
+      <button data-action="add-new">+ NEW (unassigned)</button>
+      <button data-action="add-open-unassigned">+ OPEN (unassigned)</button>
+      <button data-action="add-open-assigned">+ OPEN (assigned)</button>
     </div>
 
     <div class="panel-group">
-      <h2>Bulk</h2>
-      <button data-action="add-five">+ Add 5 unassigned</button>
+      <h2>Bulk spawn</h2>
+      <div class="inline-input">
+        <label for="bulk-count">Count</label>
+        <input id="bulk-count" type="number" min="1" max="200" value="5" />
+      </div>
+      <button data-action="bulk-add-unassigned">+ N unassigned (mixed)</button>
+      <button data-action="bulk-add-assigned">+ N assigned</button>
+    </div>
+
+    <div class="panel-group">
+      <h2>Scenarios</h2>
+      <button data-action="scenario-quiet" title="2 unassigned, 3 assigned">Quiet day</button>
+      <button data-action="scenario-busy" title="10 unassigned, 5 assigned">Busy queue</button>
+      <button data-action="scenario-stress" title="50 unassigned, 20 assigned">Stress test (70 rows)</button>
+      <button data-action="scenario-edge" title="Edge cases: long IDs, weird assignees, duplicates">Edge cases</button>
+    </div>
+
+    <div class="panel-group">
+      <h2>Auto / chaos</h2>
+      <label class="toggle-row">
+        <input type="checkbox" id="auto-spawn" />
+        <span>Auto-spawn unassigned</span>
+      </label>
+      <div class="inline-input">
+        <label for="auto-spawn-interval">Every</label>
+        <input id="auto-spawn-interval" type="number" min="1" max="60" value="5" />
+        <span class="suffix">s</span>
+      </div>
+      <label class="toggle-row">
+        <input type="checkbox" id="chaos-mode" />
+        <span>Chaos (random actions)</span>
+      </label>
+    </div>
+
+    <div class="panel-group">
+      <h2>Mass actions</h2>
+      <button data-action="assign-all">Assign all unassigned</button>
+      <button data-action="unassign-all">Unassign all</button>
+      <button data-action="delete-random">Delete random row</button>
       <button data-action="clear-all" class="danger">Clear all rows</button>
     </div>
 
-    <div class="panel-group">
+    <div class="panel-group stats-group">
       <h2>Stats</h2>
-      <div class="stat">Total rows: <span id="stat-total">0</span></div>
+      <div class="stat">Total: <span id="stat-total">0</span></div>
       <div class="stat">Unassigned: <span id="stat-unassigned">0</span></div>
       <div class="stat">Assigned: <span id="stat-assigned">0</span></div>
+      <div class="stat stat-warning">Warning: <span id="stat-warning">0</span></div>
+      <div class="stat stat-overdue">Breached: <span id="stat-overdue">0</span></div>
     </div>
   </section>
 
@@ -42,7 +81,6 @@
       <thead>
         <tr>
           <th>Status</th>
-          <th>Ticket</th>
           <th>Subject</th>
           <th>Requester</th>
           <th>Assignee</th>
@@ -57,6 +95,11 @@
       No rows yet — use the buttons above to spawn fake chats.
     </p>
   </main>
+
+  <section class="activity-log">
+    <h2>Activity log <button id="clear-log" class="link-btn">clear</button></h2>
+    <ul id="log-list"></ul>
+  </section>
 
   <footer>
     <p>

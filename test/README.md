@@ -8,13 +8,31 @@ synthetic.
 
 ## What it gives you
 
-- A control panel for spawning rows: `New`, `Open (unassigned)`,
-  `Open (assigned)`, plus a five-at-once button and a clear-all button.
-- Per-row buttons to assign / unassign / delete on the fly.
-- Live counters (total / unassigned / assigned).
-- A status pill (top-right) that lights up green once it sees the
-  extension applying its `data-timer-text`, `data-warning`, or
-  `data-overdue` attributes — i.e. the extension is working.
+A control panel split into six groups:
+
+- **Spawn one** — single buttons for NEW, OPEN unassigned, OPEN assigned.
+- **Bulk spawn** — number input + "spawn N unassigned/assigned" buttons.
+- **Scenarios** — one-click presets:
+  - *Quiet day* (2 unassigned, 3 assigned)
+  - *Busy queue* (10 unassigned, 5 assigned)
+  - *Stress test* (50 unassigned + 20 assigned = 70 rows)
+  - *Edge cases* — long IDs, exactly-64-char ID, 80-char ID (extension
+    should reject it), `#`-prefixed ID, dotted ID, two rows with the
+    same ID, a row with `—` assignee, and a row with `UNASSIGNED`
+    (uppercase) assignee.
+- **Auto / chaos** — toggle continuous spawning at a configurable
+  interval, or chaos mode (random spawn / assign / unassign / delete
+  every 1.5 s).
+- **Mass actions** — assign all unassigned, unassign all, delete a
+  random row, clear all rows.
+- **Stats** — total, unassigned, assigned, plus warning and breached
+  counts read straight from the extension's `data-warning` /
+  `data-overdue` attributes (sanity check that the extension's view of
+  the world matches yours).
+
+Plus per-row inline buttons (assign / unassign / delete), a green
+"extension active" pill once the extension touches a row, and a
+timestamped activity log along the bottom.
 
 ## Setup (once)
 
