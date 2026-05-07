@@ -1,36 +1,60 @@
 /* Chat Tracker - Content Script Styles */
 
-tr[data-timer-text]::after {
-  content: attr(data-timer-text);
-  position: absolute;
-  right: 20px;
-  background: #444;
-  color: white;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-family: monospace;
-  font-weight: bold;
-  font-size: 14px;
-  z-index: 10;
-  pointer-events: none;
+/* Make the row a positioning context for the injected timer chip.
+   Some host pages already do this (real Zendesk does); declaring it here
+   guarantees the chip lands correctly even when they don't. */
+tr[data-timer-text],
+tr[data-warning],
+tr[data-overdue],
+tr[data-chat-tracker-id] {
+  position: relative;
 }
 
+/* The chip itself is a real <div class="chat-tracker-timer"> injected by
+   the content script. Styled as a small pill anchored to the right edge
+   of the row, vertically centered. */
+.chat-tracker-timer {
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: #444;
+  color: #fff;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
+  font-weight: 700;
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  z-index: 10;
+  pointer-events: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+/* Warning state — yellow row tint + amber chip */
 tr[data-warning="true"] {
   background-color: rgba(255, 204, 0, 0.2) !important;
   border-left: 6px solid #e6b800 !important;
 }
-
-tr[data-warning="true"]::after {
+tr[data-warning="true"] .chat-tracker-timer {
   background: #e6b800;
   color: #222;
 }
 
+/* Overdue state — red row tint + red chip */
 tr[data-overdue="true"] {
   background-color: rgba(255, 0, 0, 0.15) !important;
-  border-left: 6px solid red !important;
+  border-left: 6px solid #d32f2f !important;
+}
+tr[data-overdue="true"] .chat-tracker-timer {
+  background: #d32f2f;
+  color: #fff;
+  animation: chat-tracker-pulse 0.9s ease-in-out infinite alternate;
 }
 
-tr[data-overdue="true"]::after {
-  background: red;
-  color: white;
+@keyframes chat-tracker-pulse {
+  from { box-shadow: 0 0 0 0 rgba(211, 47, 47, 0.55); }
+  to   { box-shadow: 0 0 0 6px rgba(211, 47, 47, 0); }
 }

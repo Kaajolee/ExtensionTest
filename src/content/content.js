@@ -62,6 +62,55 @@ function isRowUnassigned(row) {
   return text === '' || text === '-' || text === '—' || /^(unassigned|-)$/i.test(text);
 }
 
+// Resolve the entryId for a row, caching the result on the row itself.
+// Caching matters because the timer chip we inject below would otherwise
+// pollute row.innerText on subsequent scans (the timer text would shift the
+// first-line lookup). It also avoids re-running the regex every tick.
+function getEntryId(row) {
+  let cached = row.getAttribute('data-chat-tracker-id');
+  if (cached) return cached;
+  // Use the timer chip's textContent excluded version: read innerText but
+  // strip the chip first if it's already present.
+  const chip = row.querySelector('.chat-tracker-timer');
+  const raw = chip
+    ? (() => {
+        const txt = chip.textContent;
+        chip.textContent = '';
+        const v = row.innerText.split('\n')[0].trim();
+        chip.textContent = txt;
+        return v;
+      })()
+    : row.innerText.split('\n')[0].trim();
+  const fallback = row.getAttribute('data-test-id');
+  const id = sanitizeEntryId(raw) || sanitizeEntryId(fallback);
+  if (id) row.setAttribute('data-chat-tracker-id', id);
+  return id;
+}
+
+// Inject (or fetch) the timer chip element for a row. The chip is a real
+// DOM node rather than a CSS ::after pseudo so that it renders reliably on
+// table rows and so it can be styled / inspected directly in DevTools.
+function ensureTimerChip(row) {
+  let chip = row.querySelector(':scope > td .chat-tracker-timer');
+  if (chip) return chip;
+  // Append into the first <td> as the last child. Putting it after the
+  // ticket-id text means the row's innerText still has the id on line 1
+  // (defense-in-depth; getEntryId also caches the result).
+  const firstCell = row.firstElementChild;
+  if (!firstCell || firstCell.tagName !== 'TD') return null;
+  chip = document.createElement('div');
+  chip.className = 'chat-tracker-timer';
+  // Hide from accessibility/innerText harvesters.
+  chip.setAttribute('aria-hidden', 'true');
+  firstCell.appendChild(chip);
+  return chip;
+}
+
+function removeTimerChip(row) {
+  const chip = row.querySelector('.chat-tracker-timer');
+  if (chip) chip.remove();
+}
+
 function scanForUnassignedChats() {
   console.log('[Content] scanForUnassignedChats core logic called');
   const newBadges = document.querySelectorAll('div[data-test-id="status-badge-new"]');
@@ -86,11 +135,8 @@ function scanForUnassignedChats() {
   const currentCandidateIds = new Set();
 
   candidateRows.forEach((source, row) => {
-    // SECURITY: Sanitize entryId before storing/transmitting
-    const rawId = row.innerText.split('\n')[0].trim() || row.getAttribute('data-test-id');
-    const entryId = sanitizeEntryId(rawId);
+    const entryId = getEntryId(row);
     if (!entryId) return; // Skip rows with invalid IDs
-
     currentCandidateIds.add(entryId);
     candidates.push({ entryId, source, row });
   });
@@ -132,8 +178,13 @@ function applyRowAttributes(updates) {
     if (attrs && typeof attrs === 'object') {
       if (attrs.timer !== undefined && typeof attrs.timer === 'string') {
         row.setAttribute('data-timer-text', attrs.timer);
+        // Drive the injected chip so the user has a visible countdown
+        // regardless of host-page CSS quirks around tr::after.
+        const chip = ensureTimerChip(row);
+        if (chip) chip.textContent = attrs.timer;
       } else {
         row.removeAttribute('data-timer-text');
+        removeTimerChip(row);
       }
 
       if (attrs.warning === true) {
@@ -159,6 +210,8 @@ function cleanupRemovedRows(currentIds) {
       row.removeAttribute('data-timer-text');
       row.removeAttribute('data-warning');
       row.removeAttribute('data-overdue');
+      row.removeAttribute('data-chat-tracker-id');
+      removeTimerChip(row);
     }
   }
 }
