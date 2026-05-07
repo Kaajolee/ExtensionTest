@@ -231,6 +231,24 @@ function sendToActiveTrustedTab(payload) {
   });
 }
 
+// Like sendToActiveTrustedTab but fans out to every tab whose URL matches
+// the trusted pattern, regardless of focus. Used for UPDATE_ROWS so a
+// Zendesk tab sitting in a background window still gets timer updates
+// while the user is on an unrelated window. The data we send is identical
+// across recipients - all Zendesk tabs are showing the same queue.
+function sendToAllTrustedTabs(payload) {
+  chrome.tabs.query({}, (tabs) => {
+    if (!tabs || !tabs.length) return;
+    tabs.forEach((tab) => {
+      const url = tab.url || '';
+      if (!TRUSTED_URL_PATTERN.test(url)) return;
+      chrome.tabs.sendMessage(tab.id, payload).catch(() => {
+        // Content script may not be ready in this tab yet - ignore.
+      });
+    });
+  });
+}
+
 function broadcastSoundAlert(soundType, volume) {
   console.log('[ServiceWorker] broadcastSoundAlert core logic called', { soundType, volume });
   const safeSoundType = ALLOWED_SOUND_TYPES.has(soundType) ? soundType : 'beep';
@@ -335,8 +353,10 @@ function processScan(candidates, timestamp) {
     // Popup might not be open - this is normal, do not log as error
   });
 
-  // Broadcast to content script (only if active tab is trusted Zendesk page)
-  sendToActiveTrustedTab({
+  // Broadcast to every trusted Zendesk tab, even ones in background windows.
+  // The active-only variant is reserved for sounds (where firing in multiple
+  // tabs would be obnoxious); timer chip updates are idempotent across tabs.
+  sendToAllTrustedTabs({
     type: 'UPDATE_ROWS',
     updates: rowUpdates,
   });
@@ -413,5 +433,35 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({ ok: false, error: 'unknown_type' });
   }
 });
+
+// ---------- background-tab keep-alive ----------
+//
+// Chrome / Edge throttle setInterval in tabs whose window is not in focus -
+// the content script's 1s scan can drop to once per minute when the user
+// switches to an unrelated window. Without an independent ticker the SW
+// stops receiving SCAN_RESULTs, the timer chip in the Zendesk tab freezes,
+// and breach detection lags by however long the throttle keeps the tab
+// suspended.
+//
+// chrome.alarms is not subject to that throttling. We schedule a tick every
+// 30 seconds (the MV3 minimum) which re-runs processScan against the cached
+// activeEntries. That keeps elapsed-time computations, cumulative counters,
+// and the broadcast UPDATE_ROWS flowing even while the Zendesk window is
+// backgrounded, so the chip is up to date the moment the user switches back.
+const TICK_ALARM_NAME = 'chat-tracker-tick';
+
+if (chrome.alarms) {
+  chrome.alarms.create(TICK_ALARM_NAME, { periodInMinutes: 0.5 });
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name !== TICK_ALARM_NAME) return;
+    if (state.activeEntries.size === 0) return; // nothing to tick
+    console.log('[ServiceWorker] Alarm tick - re-evaluating', state.activeEntries.size, 'entries');
+    const candidates = Array.from(state.activeEntries.entries()).map(([id, entry]) => ({
+      entryId: id,
+      source: entry.source,
+    }));
+    processScan(candidates, Date.now());
+  });
+}
 
 console.log('[Chat Tracker] Service Worker loaded');
