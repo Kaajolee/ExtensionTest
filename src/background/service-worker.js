@@ -35,7 +35,21 @@ const defaultSettings = {
 // area lives in browser memory only and is wiped on browser restart, which is
 // exactly the lifetime we want for "hanging chat" detection state.
 const ACTIVE_ENTRIES_KEY = 'activeEntries';
+const SESSION_TOTALS_KEY = 'sessionTotals';
 
+// Metrics are cumulative session counters, not live snapshots:
+//   breachedCount  - number of distinct chats that crossed the breach
+//                    threshold during this browser session
+//   warningCount   - number of distinct chats that crossed the warning
+//                    threshold during this browser session
+//   totalHanging   - LIVE count of chats currently being tracked (the
+//                    one snapshot value the popup still shows)
+//
+// The cumulative counters are reset only by an explicit RESET from the
+// popup or when chrome.storage.session itself is wiped (browser restart,
+// extension reload). Per-entry flags below ensure each chat is only
+// counted once even if it lingers in the warning/breach state for many
+// scan ticks.
 const state = {
   activeEntries: new Map(),
   settings: { ...defaultSettings },
@@ -55,42 +69,67 @@ chrome.storage.local.get('settings', (result) => {
   }
 });
 
-// Restore activeEntries from session storage on (re)start. This lets a
-// breached chat keep its original detectedAt across SW restarts so the user
-// doesn't see timers reset when the worker is silently respawned by Chrome.
-function restoreActiveEntries() {
+// Restore activeEntries + session totals from session storage on (re)start.
+// This lets a breached chat keep its original detectedAt and its
+// already-counted flags across SW restarts so cumulative counters don't
+// double-tick when the worker is silently respawned by Chrome.
+function restoreSessionState() {
   if (!chrome.storage.session) return;
-  chrome.storage.session.get(ACTIVE_ENTRIES_KEY, (result) => {
-    const raw = result && result[ACTIVE_ENTRIES_KEY];
-    if (!Array.isArray(raw)) return;
-    let restored = 0;
-    raw.forEach(([id, entry]) => {
-      const safeId = sanitizeEntryId(id);
-      if (!safeId || !entry || typeof entry !== 'object') return;
-      const detectedAt = typeof entry.detectedAt === 'number' && isFinite(entry.detectedAt)
-        ? entry.detectedAt
-        : Date.now();
-      const source = entry.source === 'new' || entry.source === 'open' ? entry.source : 'open';
-      const alerted = entry.alerted === true;
-      state.activeEntries.set(safeId, { detectedAt, alerted, source });
-      restored++;
-    });
-    if (restored > 0) {
-      console.log('[ServiceWorker] Restored', restored, 'activeEntries from session storage');
+  chrome.storage.session.get([ACTIVE_ENTRIES_KEY, SESSION_TOTALS_KEY], (result) => {
+    // Active entries
+    const rawEntries = result && result[ACTIVE_ENTRIES_KEY];
+    if (Array.isArray(rawEntries)) {
+      let restored = 0;
+      rawEntries.forEach(([id, entry]) => {
+        const safeId = sanitizeEntryId(id);
+        if (!safeId || !entry || typeof entry !== 'object') return;
+        const detectedAt = typeof entry.detectedAt === 'number' && isFinite(entry.detectedAt)
+          ? entry.detectedAt
+          : Date.now();
+        const source = entry.source === 'new' || entry.source === 'open' ? entry.source : 'open';
+        state.activeEntries.set(safeId, {
+          detectedAt,
+          source,
+          alerted: entry.alerted === true,
+          warnedThisSession: entry.warnedThisSession === true,
+          breachedThisSession: entry.breachedThisSession === true,
+        });
+        restored++;
+      });
+      if (restored > 0) {
+        console.log('[ServiceWorker] Restored', restored, 'activeEntries from session storage');
+      }
+    }
+
+    // Cumulative session totals
+    const rawTotals = result && result[SESSION_TOTALS_KEY];
+    if (rawTotals && typeof rawTotals === 'object') {
+      if (typeof rawTotals.breachedCount === 'number' && rawTotals.breachedCount >= 0) {
+        state.metrics.breachedCount = Math.floor(rawTotals.breachedCount);
+      }
+      if (typeof rawTotals.warningCount === 'number' && rawTotals.warningCount >= 0) {
+        state.metrics.warningCount = Math.floor(rawTotals.warningCount);
+      }
     }
   });
 }
-restoreActiveEntries();
+restoreSessionState();
 
-// Mirror the in-memory activeEntries Map to chrome.storage.session.
-// Called after every mutation that matters (new entry, removal, alerted flip,
-// settings change, reset). Storage writes here are cheap because session
-// storage is in-memory and the payload is small.
-function persistActiveEntries() {
+// Mirror the in-memory activeEntries Map and the cumulative session totals
+// to chrome.storage.session. Called after every mutation that matters.
+// Storage writes are cheap because session storage is in-memory and the
+// payload is small.
+function persistSessionState() {
   if (!chrome.storage.session) return;
   const arr = Array.from(state.activeEntries.entries());
-  chrome.storage.session.set({ [ACTIVE_ENTRIES_KEY]: arr }).catch((err) => {
-    console.warn('[ServiceWorker] Failed to persist activeEntries:', err);
+  chrome.storage.session.set({
+    [ACTIVE_ENTRIES_KEY]: arr,
+    [SESSION_TOTALS_KEY]: {
+      breachedCount: state.metrics.breachedCount,
+      warningCount: state.metrics.warningCount,
+    },
+  }).catch((err) => {
+    console.warn('[ServiceWorker] Failed to persist session state:', err);
   });
 }
 
@@ -206,8 +245,6 @@ function broadcastSoundAlert(soundType, volume) {
 function processScan(candidates, timestamp) {
   console.log('[ServiceWorker] processScan core logic called', { candidateCount: candidates.length, timestamp });
   const seenThisPass = new Set();
-  let activeBreaches = 0;
-  let activeWarnings = 0;
   const rowUpdates = {};
 
   candidates.forEach(({ entryId, source }) => {
@@ -216,8 +253,10 @@ function processScan(candidates, timestamp) {
     if (!state.activeEntries.has(entryId)) {
       state.activeEntries.set(entryId, {
         detectedAt: timestamp,
-        alerted: false,
         source: source,
+        alerted: false,                // breach sound has played
+        warnedThisSession: false,      // counted toward warning session total
+        breachedThisSession: false,    // counted toward breach session total
       });
     }
 
@@ -229,7 +268,23 @@ function processScan(candidates, timestamp) {
 
     if (elapsedSeconds >= state.settings.breachThreshold) {
       isBreached = true;
-      activeBreaches++;
+
+      // First time this chat crosses the breach threshold this session -
+      // bump the cumulative counter. After this it stays counted no matter
+      // how long the chat lingers, gets removed, or the SW restarts.
+      if (!entry.breachedThisSession) {
+        entry.breachedThisSession = true;
+        state.metrics.breachedCount++;
+
+        // A chat that jumps straight to breach (e.g. high warningThreshold,
+        // or first scan after a long gap) should still count as having
+        // entered the warning zone.
+        if (!entry.warnedThisSession) {
+          entry.warnedThisSession = true;
+          state.metrics.warningCount++;
+        }
+      }
+
       if (!entry.alerted) {
         entry.alerted = true;
         if (!state.settings.isMuted) {
@@ -238,7 +293,11 @@ function processScan(candidates, timestamp) {
       }
     } else if (elapsedSeconds >= state.settings.warningThreshold) {
       isWarning = true;
-      activeWarnings++;
+
+      if (!entry.warnedThisSession) {
+        entry.warnedThisSession = true;
+        state.metrics.warningCount++;
+      }
     }
 
     const timer = Math.ceil(state.settings.breachThreshold - elapsedSeconds) + 's';
@@ -249,7 +308,8 @@ function processScan(candidates, timestamp) {
     };
   });
 
-  // Clean up removed entries
+  // Clean up removed entries. Cumulative counters do NOT decrement here -
+  // a chat that has been counted stays counted for the session.
   for (const [id] of state.activeEntries) {
     if (!seenThisPass.has(id)) {
       state.activeEntries.delete(id);
@@ -259,14 +319,13 @@ function processScan(candidates, timestamp) {
     }
   }
 
-  // Update metrics
-  state.metrics.breachedCount = activeBreaches;
-  state.metrics.warningCount = activeWarnings;
+  // Live count of currently tracked chats. Purely a snapshot; the popup
+  // doesn't display this today but it's still useful telemetry.
   state.metrics.totalHanging = state.activeEntries.size;
 
-  // Persist after every scan so that any add/remove/alert flip survives a
-  // SW termination. The write is small and goes to in-memory session storage.
-  persistActiveEntries();
+  // Persist after every scan so that any add/removal/alert flip and any
+  // bump to the cumulative counters survives a SW termination.
+  persistSessionState();
 
   // Broadcast to popup (popup is internal, no tab URL check needed)
   chrome.runtime.sendMessage({
@@ -329,8 +388,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   } else if (request.type === 'RESET') {
     console.log('[ServiceWorker] RESET message received');
     state.activeEntries.clear();
+    // Zero out both live + cumulative counters explicitly. RESET is the only
+    // intentional path that decrements the session totals.
     state.metrics = { breachedCount: 0, warningCount: 0, totalHanging: 0 };
-    persistActiveEntries(); // wipe session-storage copy too
+    persistSessionState(); // wipe session-storage copy too
 
     chrome.runtime.sendMessage({
       type: 'STATE_UPDATE',
