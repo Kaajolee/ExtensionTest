@@ -1,4 +1,4 @@
-// Zendesk Chat Tracker - Content Script
+// ontent Script
 // Scans DOM for unassigned chats and maintains visual indicators
 
 import './content.css'
@@ -57,6 +57,7 @@ function scanForUnassignedChats() {
       timestamp: Date.now(),
     }).catch(() => {
       // Service worker might not be ready, ignore
+      console.logerror("[Content] Failed to send SCAN_RESULT message to service worker");
     });
   }
 

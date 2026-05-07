@@ -39,6 +39,7 @@ function broadcastSoundAlert(soundType, volume) {
         volume,
       }).catch(() => {
         // Content script might not be ready
+        console.logerror("[ServiceWorker] Failed to send PLAY_SOUND message to content script");
       });
     }
   });
@@ -111,6 +112,7 @@ function processScan(candidates, timestamp) {
     metrics: state.metrics,
   }).catch(() => {
     // Popup might not be open
+    console.logerror("[ServiceWorker] Failed to send STATE_UPDATE message to popup");
   });
 
   // Broadcast to content script
@@ -121,6 +123,7 @@ function processScan(candidates, timestamp) {
         updates: rowUpdates,
       }).catch(() => {
         // Content script might not be ready
+        console.logerror("[ServiceWorker] Failed to send UPDATE_ROWS message to content script");
       });
     }
   });
