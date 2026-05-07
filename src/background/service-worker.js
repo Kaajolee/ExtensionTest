@@ -3,7 +3,10 @@
 
 // SECURITY: Trusted origins - only accept content-script messages from these patterns.
 // Mirrors manifest.json content_scripts.matches; defense-in-depth verification.
-const TRUSTED_URL_PATTERN = /^https:\/\/([^/]+\.zendesk\.com|[^/]+\/hc\/agent)/i;
+// NOTE: localhost is permitted on this branch (offline-testing) so the mock
+// harness in test/ can drive the extension. Remove before merging to main.
+const TRUSTED_URL_PATTERN =
+  /^(https:\/\/([^/]+\.zendesk\.com|[^/]+\/hc\/agent)|http:\/\/(localhost|127\.0\.0\.1):8080)/i;
 
 // SECURITY: entryId pattern (mirrors content script). Reject anything else.
 const ENTRY_ID_PATTERN = /^[a-zA-Z0-9_\-#.]{1,64}$/;

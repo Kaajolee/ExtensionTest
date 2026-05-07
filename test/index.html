@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Zendesk Mock — Chat Monitor Test Harness</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Zendesk Mock <span class="tag">test harness</span></div>
+    <div class="connection">
+      <span id="extension-status" class="dot dot-unknown" title="Extension status"></span>
+      <span id="extension-status-text">Extension: detecting…</span>
+    </div>
+  </header>
+
+  <section class="control-panel">
+    <div class="panel-group">
+      <h2>Spawn rows</h2>
+      <button data-action="add-new">+ Add NEW (unassigned)</button>
+      <button data-action="add-open-unassigned">+ Add OPEN (unassigned)</button>
+      <button data-action="add-open-assigned">+ Add OPEN (assigned)</button>
+    </div>
+
+    <div class="panel-group">
+      <h2>Bulk</h2>
+      <button data-action="add-five">+ Add 5 unassigned</button>
+      <button data-action="clear-all" class="danger">Clear all rows</button>
+    </div>
+
+    <div class="panel-group">
+      <h2>Stats</h2>
+      <div class="stat">Total rows: <span id="stat-total">0</span></div>
+      <div class="stat">Unassigned: <span id="stat-unassigned">0</span></div>
+      <div class="stat">Assigned: <span id="stat-assigned">0</span></div>
+    </div>
+  </section>
+
+  <main>
+    <table class="ticket-table">
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>Ticket</th>
+          <th>Subject</th>
+          <th>Requester</th>
+          <th>Assignee</th>
+          <th>Updated</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="ticket-rows"></tbody>
+    </table>
+
+    <p class="empty-state" id="empty-state">
+      No rows yet — use the buttons above to spawn fake chats.
+    </p>
+  </main>
+
+  <footer>
+    <p>
+      DOM mirrors the selectors used by the Chat Monitor extension:
+      <code>div[data-test-id="status-badge-new"]</code>,
+      <code>div[data-test-id="status-badge-open"]</code>,
+      <code>td[data-test-id="ticket-table-cells-assignee"]</code>.
+    </p>
+  </footer>
+
+  <script src="mock.js"></script>
+</body>
+</html>

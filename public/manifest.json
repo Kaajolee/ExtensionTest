@@ -16,7 +16,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://*/hc/agent/*", "https://*.zendesk.com/*"],
+      "matches": [
+        "https://*/hc/agent/*",
+        "https://*.zendesk.com/*",
+        "http://localhost:8080/*",
+        "http://127.0.0.1:8080/*"
+      ],
       "js": ["content.js"],
       "run_at": "document_end"
     }
