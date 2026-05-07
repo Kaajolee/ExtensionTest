@@ -10,8 +10,6 @@ const config = {
   entryIdPattern: /^[a-zA-Z0-9_\-#.]{1,64}$/,
 };
 
-let lastCandidates = new Set();
-
 // SECURITY: Reusable AudioContext - matches standalone-script behavior, prevents resource churn.
 // Created lazily because some browsers block AudioContext until a user gesture.
 let sharedAudioCtx = null;
@@ -97,21 +95,22 @@ function scanForUnassignedChats() {
     candidates.push({ entryId, source, row });
   });
 
-  // Only send message if the set of candidates changed
-  const candidateIds = new Set(candidates.map(c => c.entryId));
-  if (JSON.stringify(Array.from(candidateIds).sort()) !== JSON.stringify(Array.from(lastCandidates).sort())) {
-    lastCandidates = candidateIds;
-
-    const scanData = candidates.map(c => ({ entryId: c.entryId, source: c.source }));
-    chrome.runtime.sendMessage({
-      type: 'SCAN_RESULT',
-      candidates: scanData,
-      timestamp: Date.now(),
-    }).catch((err) => {
-      // Service worker might not be ready, ignore
-      console.error('[Content] Failed to send SCAN_RESULT message to service worker', err);
-    });
-  }
+  // Always send SCAN_RESULT every scan tick (even if the candidate set is
+  // unchanged). Reasons:
+  //  1. The service worker needs the latest timestamp every second to compute
+  //     elapsed time and emit fresh data-timer-text values back to us.
+  //  2. Each message resets the MV3 service worker's idle timer; without
+  //     periodic traffic the SW gets terminated after ~30s and timer state
+  //     is lost.
+  const scanData = candidates.map(c => ({ entryId: c.entryId, source: c.source }));
+  chrome.runtime.sendMessage({
+    type: 'SCAN_RESULT',
+    candidates: scanData,
+    timestamp: Date.now(),
+  }).catch((err) => {
+    // Service worker might not be ready, ignore
+    console.error('[Content] Failed to send SCAN_RESULT message to service worker', err);
+  });
 
   // Store row references for later attribute updates
   window.__chatTrackerRows = new Map(candidates.map(c => [c.entryId, c.row]));

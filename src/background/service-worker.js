@@ -30,8 +30,12 @@ const defaultSettings = {
   warningColor: '#ffcc00',
 };
 
-// State lives only in service worker memory; not persisted.
-// activeEntries values are derived from DOM data and treated as untrusted strings.
+// activeEntries is mirrored to chrome.storage.session so it survives the MV3
+// service worker getting terminated after ~30s of idle. The session storage
+// area lives in browser memory only and is wiped on browser restart, which is
+// exactly the lifetime we want for "hanging chat" detection state.
+const ACTIVE_ENTRIES_KEY = 'activeEntries';
+
 const state = {
   activeEntries: new Map(),
   settings: { ...defaultSettings },
@@ -50,6 +54,45 @@ chrome.storage.local.get('settings', (result) => {
     state.settings = sanitizeSettings({ ...state.settings, ...result.settings });
   }
 });
+
+// Restore activeEntries from session storage on (re)start. This lets a
+// breached chat keep its original detectedAt across SW restarts so the user
+// doesn't see timers reset when the worker is silently respawned by Chrome.
+function restoreActiveEntries() {
+  if (!chrome.storage.session) return;
+  chrome.storage.session.get(ACTIVE_ENTRIES_KEY, (result) => {
+    const raw = result && result[ACTIVE_ENTRIES_KEY];
+    if (!Array.isArray(raw)) return;
+    let restored = 0;
+    raw.forEach(([id, entry]) => {
+      const safeId = sanitizeEntryId(id);
+      if (!safeId || !entry || typeof entry !== 'object') return;
+      const detectedAt = typeof entry.detectedAt === 'number' && isFinite(entry.detectedAt)
+        ? entry.detectedAt
+        : Date.now();
+      const source = entry.source === 'new' || entry.source === 'open' ? entry.source : 'open';
+      const alerted = entry.alerted === true;
+      state.activeEntries.set(safeId, { detectedAt, alerted, source });
+      restored++;
+    });
+    if (restored > 0) {
+      console.log('[ServiceWorker] Restored', restored, 'activeEntries from session storage');
+    }
+  });
+}
+restoreActiveEntries();
+
+// Mirror the in-memory activeEntries Map to chrome.storage.session.
+// Called after every mutation that matters (new entry, removal, alerted flip,
+// settings change, reset). Storage writes here are cheap because session
+// storage is in-memory and the payload is small.
+function persistActiveEntries() {
+  if (!chrome.storage.session) return;
+  const arr = Array.from(state.activeEntries.entries());
+  chrome.storage.session.set({ [ACTIVE_ENTRIES_KEY]: arr }).catch((err) => {
+    console.warn('[ServiceWorker] Failed to persist activeEntries:', err);
+  });
+}
 
 // ---------- SECURITY: validation helpers ----------
 
@@ -221,6 +264,10 @@ function processScan(candidates, timestamp) {
   state.metrics.warningCount = activeWarnings;
   state.metrics.totalHanging = state.activeEntries.size;
 
+  // Persist after every scan so that any add/remove/alert flip survives a
+  // SW termination. The write is small and goes to in-memory session storage.
+  persistActiveEntries();
+
   // Broadcast to popup (popup is internal, no tab URL check needed)
   chrome.runtime.sendMessage({
     type: 'STATE_UPDATE',
@@ -283,6 +330,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log('[ServiceWorker] RESET message received');
     state.activeEntries.clear();
     state.metrics = { breachedCount: 0, warningCount: 0, totalHanging: 0 };
+    persistActiveEntries(); // wipe session-storage copy too
 
     chrome.runtime.sendMessage({
       type: 'STATE_UPDATE',
