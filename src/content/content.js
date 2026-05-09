@@ -5,18 +5,11 @@ import './content.css'
 
 const config = {
   scanInterval: 1000, // 1 second
-  // SECURITY: entryId pattern - only allow safe characters (alphanumeric, hyphens, underscores, hash, dot)
-  // Prevents storing arbitrary strings extracted from the DOM if Zendesk markup is tampered with.
   entryIdPattern: /^[a-zA-Z0-9_\-#.]{1,64}$/,
 };
 
-// SECURITY: Reusable AudioContext - matches standalone-script behavior, prevents resource churn.
-// Created lazily because some browsers block AudioContext until a user gesture.
 let sharedAudioCtx = null;
 
-// SECURITY: Sanitize entryId extracted from DOM.
-// DOM data is untrusted; if the page is compromised, an attacker could inject malicious IDs.
-// Returning null causes the caller to skip the row.
 function sanitizeEntryId(id) {
   if (typeof id !== 'string') return null;
   const trimmed = id.trim();
@@ -27,14 +20,12 @@ function sanitizeEntryId(id) {
   return trimmed;
 }
 
-// SECURITY: Validate UPDATE_ROWS message shape from service worker.
 function isValidUpdateMessage(request) {
   if (!request || typeof request !== 'object') return false;
   if (!request.updates || typeof request.updates !== 'object') return false;
   return true;
 }
 
-// SECURITY: Validate PLAY_SOUND message shape from service worker.
 function isValidPlaySoundMessage(request) {
   if (!request || typeof request !== 'object') return false;
   if (typeof request.volume !== 'number') return false;

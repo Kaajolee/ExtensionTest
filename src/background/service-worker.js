@@ -5,20 +5,22 @@
 // Mirrors manifest.json content_scripts.matches; defense-in-depth verification.
 // NOTE: localhost is permitted on this branch (offline-testing) so the mock
 // harness in test/ can drive the extension. Remove before merging to main.
+
+// trusted URL origins, if the URL does not match the specified 
+// one the extension will reject the connection and will not operate on that link
 const TRUSTED_URL_PATTERN =
   /^(https:\/\/([^/]+\.zendesk\.com|[^/]+\/hc\/agent)|http:\/\/(localhost|127\.0\.0\.1):8080)/i;
 
-// SECURITY: entryId pattern (mirrors content script). Reject anything else.
+// entryId format validation
 const ENTRY_ID_PATTERN = /^[a-zA-Z0-9_\-#.]{1,64}$/;
 
-// SECURITY: Hex color pattern for breachColor / warningColor settings.
+// hex color format validation
 const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 
-// SECURITY: Allowed sound type values.
+// allowed sound type values.
 const ALLOWED_SOUND_TYPES = new Set(['beep', 'chime', 'alert']);
 
-// WARNING: Settings are persisted in chrome.storage.local in plaintext.
-// Do not store secrets, API tokens, credentials, or PII here.
+// settings that are stored in the chrome.storage.local space
 const defaultSettings = {
   breachThreshold: 60,
   warningThreshold: 20,
@@ -133,7 +135,7 @@ function persistSessionState() {
   });
 }
 
-// ---------- SECURITY: validation helpers ----------
+// validation helpers
 
 // Verify a message originated from one of our own content scripts on a trusted URL.
 // Returns true for popup/internal messages (where sender.tab is undefined).
@@ -405,6 +407,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }));
     processScan(candidates, Date.now());
     sendResponse({ ok: true });
+    
   } else if (request.type === 'RESET') {
     console.log('[ServiceWorker] RESET message received');
     state.activeEntries.clear();
@@ -417,12 +420,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       type: 'STATE_UPDATE',
       metrics: state.metrics,
     }).catch(() => {});
-
     sendResponse({ ok: true });
+
   } else if (request.type === 'PLAY_SOUND') {
     console.log('[ServiceWorker] PLAY_SOUND message received', { soundType: request.soundType, volume: request.volume });
     broadcastSoundAlert(request.soundType, request.volume);
     sendResponse({ ok: true });
+
   } else if (request.type === 'REQUEST_CURRENT_STATE') {
     console.log('[ServiceWorker] REQUEST_CURRENT_STATE message received');
     sendResponse({
