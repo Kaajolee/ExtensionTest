@@ -313,16 +313,25 @@ export function Popup() {
                       <Label className="text-sm font-medium">Breach</Label>
                     </div>
                     <div className="flex items-center gap-2">
+                      {/*
+                        Audit #8 visual indicator: inline `style` so the red
+                        border / ring win against the shadcn Input's own
+                        `border-input` and aria-invalid utility classes.
+                        Tailwind's `cn()` merge was leaving the base color
+                        in place on conflict.
+                      */}
                       <Input
                         type="number"
                         value={breachThreshold}
                         onChange={handleBreachThresholdChange}
                         aria-invalid={!breachValid || !thresholdsOrdered}
-                        className={`flex-1 h-9 text-center text-sm border bg-muted/50 ${
-                          !breachValid || !thresholdsOrdered
-                            ? 'border-red-500 ring-1 ring-red-500'
-                            : 'border-0'
-                        }`}
+                        style={(!breachValid || !thresholdsOrdered) ? {
+                          borderColor: '#ef4444',
+                          borderWidth: '2px',
+                          boxShadow: '0 0 0 2px rgba(239, 68, 68, 0.25)',
+                          backgroundColor: 'rgba(239, 68, 68, 0.08)',
+                        } : undefined}
+                        className="flex-1 h-9 text-center text-sm bg-muted/50"
                         min="1"
                       />
                       <span className="text-xs text-muted-foreground">sec</span>
@@ -340,11 +349,13 @@ export function Popup() {
                         value={warningThreshold}
                         onChange={handleWarningThresholdChange}
                         aria-invalid={!warningValid || !thresholdsOrdered}
-                        className={`flex-1 h-9 text-center text-sm border bg-muted/50 ${
-                          !warningValid || !thresholdsOrdered
-                            ? 'border-red-500 ring-1 ring-red-500'
-                            : 'border-0'
-                        }`}
+                        style={(!warningValid || !thresholdsOrdered) ? {
+                          borderColor: '#ef4444',
+                          borderWidth: '2px',
+                          boxShadow: '0 0 0 2px rgba(239, 68, 68, 0.25)',
+                          backgroundColor: 'rgba(239, 68, 68, 0.08)',
+                        } : undefined}
+                        className="flex-1 h-9 text-center text-sm bg-muted/50"
                         min="0"
                       />
                       <span className="text-xs text-muted-foreground">sec</span>
@@ -352,12 +363,19 @@ export function Popup() {
                   </div>
                 </div>
                 {!thresholdsValid && (
-                  <p className="mt-3 text-xs text-red-500" role="alert">
-                    {!breachValid && 'Breach must be a positive number. '}
-                    {!warningValid && 'Warning must be 0 or greater. '}
-                    {breachValid && warningValid && !thresholdsOrdered &&
-                      'Warning must be less than breach.'}
-                  </p>
+                  <div
+                    role="alert"
+                    className="mt-3 flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-2 text-xs font-medium text-red-600 dark:text-red-400"
+                  >
+                    <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                    <span>
+                      {!breachValid && 'Breach must be a positive number. '}
+                      {!warningValid && 'Warning must be 0 or greater. '}
+                      {breachValid && warningValid && !thresholdsOrdered &&
+                        'Warning must be less than Breach.'}
+                      {' Settings are not being saved while invalid.'}
+                    </span>
+                  </div>
                 )}
               </section>
 
