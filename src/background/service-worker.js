@@ -3,7 +3,11 @@
 
 // SECURITY: Trusted origins - only accept content-script messages from these patterns.
 // Mirrors manifest.json content_scripts.matches; defense-in-depth verification.
-const TRUSTED_URL_PATTERN = /^https:\/\/([^/]+\.zendesk\.com|[^/]+\/hc\/agent)/i;
+// Audit finding #3 (HIGH): pattern is now scoped to the Zendesk agent filter
+// view (the "All Chats" / queue page) only - not the whole *.zendesk.com
+// domain or arbitrary /hc/agent/ paths, so a compromised marketing page on
+// the same subdomain cannot inject SCAN_RESULT messages.
+const TRUSTED_URL_PATTERN = /^https:\/\/[^/]+\.zendesk\.com\/agent\/filters\//i;
 
 // SECURITY: entryId pattern (mirrors content script). Reject anything else.
 const ENTRY_ID_PATTERN = /^[a-zA-Z0-9_\-#.]{1,64}$/;

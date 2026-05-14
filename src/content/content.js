@@ -233,11 +233,98 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
+// ---------- Audit finding #11 (LOW): selector health check ----------
+//
+// All Zendesk DOM selectors the extension depends on are listed here. If
+// Zendesk renames any of these data-test-id attributes (which has happened
+// before and will happen again), the extension stops detecting chats
+// silently - agents would believe they are being monitored when they are
+// not. We poll for these selectors during the first ~10 seconds after the
+// content script loads and surface a visible warning banner on the Zendesk
+// page if anything still resolves to zero matches.
+const REQUIRED_SELECTORS = [
+  // At least one status badge must exist on the agent filters page. If
+  // BOTH are missing the queue is either empty (acceptable) or the markup
+  // has changed (not acceptable) - we treat persistent absence of either
+  // selector definition as a markup change.
+  { selector: 'div[data-test-id="status-badge-new"]',           label: 'status-badge-new'           },
+  { selector: 'div[data-test-id="status-badge-open"]',          label: 'status-badge-open'          },
+  { selector: 'td[data-test-id="ticket-table-cells-assignee"]', label: 'ticket-table-cells-assignee' },
+];
+
+function findMissingSelectors() {
+  // A selector is considered "missing" if its CSS rule itself produces no
+  // matches anywhere in the document. An empty queue legitimately yields
+  // zero status-badge-* rows, so the health check waits past the initial
+  // page render before deciding the selectors are broken.
+  return REQUIRED_SELECTORS.filter(({ selector }) => {
+    try {
+      return document.querySelector(selector) === null;
+    } catch (_e) {
+      // Malformed selector (e.g. due to a typo in a future change) also
+      // counts as missing.
+      return true;
+    }
+  });
+}
+
+let healthWarningEl = null;
+function showSelectorHealthWarning(missing) {
+  if (healthWarningEl) return; // already shown
+  healthWarningEl = document.createElement('div');
+  healthWarningEl.setAttribute('role', 'alert');
+  healthWarningEl.setAttribute('aria-live', 'polite');
+  // Inline styles so we don't depend on a CSS rule being injected/loaded.
+  healthWarningEl.style.cssText = [
+    'position:fixed', 'top:12px', 'right:12px', 'z-index:2147483647',
+    'max-width:360px', 'padding:10px 14px',
+    'background:#b71c1c', 'color:#fff',
+    'font:600 12px/1.4 system-ui,-apple-system,Segoe UI,sans-serif',
+    'border-radius:6px', 'box-shadow:0 4px 12px rgba(0,0,0,.25)',
+    'pointer-events:auto',
+  ].join(';');
+  healthWarningEl.textContent =
+    'Chat Monitor: Zendesk page markup may have changed — selectors missing: ' +
+    missing.map((m) => m.label).join(', ') +
+    '. Monitoring may be inaccurate. Please update the extension.';
+  // Make the banner dismissible so it isn't permanently in the agent's face.
+  healthWarningEl.addEventListener('click', () => healthWarningEl?.remove());
+  document.body && document.body.appendChild(healthWarningEl);
+}
+
+function validateSelectors() {
+  // Poll up to 10 times at 1s intervals. The page may be lazy-loading the
+  // queue, so we give it a generous window to settle before flagging.
+  const MAX_ATTEMPTS = 10;
+  let attempts = 0;
+  const check = () => {
+    attempts++;
+    const missing = findMissingSelectors();
+    if (missing.length === 0) {
+      // Found everything at least once - we're confident the markup hasn't
+      // moved. Stop polling.
+      console.log('[Content] Selector health check passed');
+      return;
+    }
+    if (attempts >= MAX_ATTEMPTS) {
+      console.warn('[Content] Selector health check failed:', missing.map((m) => m.label));
+      showSelectorHealthWarning(missing);
+      return;
+    }
+    setTimeout(check, 1000);
+  };
+  // Wait a tick for the initial DOM render before we even start polling.
+  setTimeout(check, 1000);
+}
+
 // Start scanning
 const scanIntervalId = setInterval(scanForUnassignedChats, config.scanInterval);
 
 // Initial scan
 scanForUnassignedChats();
+
+// Kick off the selector health check.
+validateSelectors();
 
 // Cleanup on unload
 window.addEventListener('unload', () => {
