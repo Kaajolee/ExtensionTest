@@ -3,6 +3,16 @@
 
 import './content.css'
 
+// SECURITY (audit finding #1, CRITICAL): the entire content-script body is
+// wrapped in an IIFE so that no identifier - config, sharedAudioCtx,
+// sanitizeEntryId, scanForUnassignedChats, applyRowAttributes, playSound,
+// etc. - is reachable from page-world scripts. Chrome's isolated worlds
+// already prevent cross-context access in practice, but the audit asked for
+// explicit module-scope isolation as defense-in-depth, and the IIFE makes
+// the intent obvious for future maintainers.
+(function () {
+'use strict';
+
 const config = {
   scanInterval: 1000, // 1 second
   // SECURITY: entryId pattern - only allow safe characters (alphanumeric, hyphens, underscores, hash, dot)
@@ -235,3 +245,5 @@ window.addEventListener('unload', () => {
 });
 
 console.log('[Chat Tracker] Content script loaded');
+
+})(); // end IIFE

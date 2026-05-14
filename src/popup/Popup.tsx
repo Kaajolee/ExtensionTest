@@ -33,9 +33,17 @@ export function Popup() {
 
   // Status
   const [isEnabled, setIsEnabled] = useState(true)
-  const [breachedChats, setBreachedChats] = useState(3)
-  const [warningChats, setWarningChats] = useState(7)
-  const [runtime, setRuntime] = useState("02:34:15")
+  // Audit finding #2 (CRITICAL): initial values must be the empty/zero
+  // state, not mock numbers. Real values arrive from the service worker on
+  // mount via REQUEST_CURRENT_STATE and on every STATE_UPDATE thereafter.
+  // The old useState(3) / useState(7) / "02:34:15" caused the popup to
+  // flash bogus figures for the first render before real state replaced
+  // them, which the audit flagged as the popup being "disconnected from
+  // extension logic" because to a casual viewer it looked like the numbers
+  // were hardcoded.
+  const [breachedChats, setBreachedChats] = useState(0)
+  const [warningChats, setWarningChats] = useState(0)
+  const [runtime, setRuntime] = useState("00:00:00")
 
   // Chat Refresh
   const [refreshFrequency, setRefreshFrequency] = useState("30")
