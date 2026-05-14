@@ -1,50 +1,17 @@
 // Zendesk Chat Tracker - Service Worker
 // Manages chat state, timers, and threshold evaluation
 
-// SECURITY: Trusted origins - only accept content-script messages from these patterns.
-// Mirrors manifest.json content_scripts.matches; defense-in-depth verification.
-// Audit finding #3 (HIGH): pattern is now scoped to the Zendesk agent filter
-// view (the "All Chats" / queue page) only - not the whole *.zendesk.com
-// domain or arbitrary /hc/agent/ paths, so a compromised marketing page on
-// the same subdomain cannot inject SCAN_RESULT messages.
+
 const TRUSTED_URL_PATTERN = /^https:\/\/[^/]+\.zendesk\.com\/agent\/filters\//i;
 
-// SECURITY: entryId pattern (mirrors content script). Reject anything else.
 const ENTRY_ID_PATTERN = /^[a-zA-Z0-9_\-#.]{1,64}$/;
 
-// SECURITY: Hex color pattern for breachColor / warningColor settings.
 const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 
 // SECURITY: Allowed sound type values.
 const ALLOWED_SOUND_TYPES = new Set(['beep', 'chime', 'alert']);
 
-// SETTINGS PERSISTENCE
-// ---------------------
-// Settings are persisted in `chrome.storage.local` for long-term, single-user
-// use. Behaviour:
-//   - Survives:  popup close, service-worker idle eviction, tab close,
-//                extension reload, browser restart, OS reboot. Settings
-//                stick around until the user uninstalls the extension or
-//                clears extension data manually.
-//   - Cleared:   uninstall, "Clear extension data" in chrome://settings,
-//                or an explicit `chrome.storage.local.clear()` call.
-//
-// SECURITY notes:
-//   - `chrome.storage.local` writes to disk in PLAINTEXT (the extension's
-//     profile directory). It is forensically recoverable after the browser
-//     exits. Treat anything stored here as readable by anyone with file-
-//     system access to the user's profile.
-//   - Do NOT store secrets, API tokens, credentials, or PII here. Only UI
-//     preferences and thresholds.
-//   - `chrome.storage.local` does NOT support setAccessLevel - that API is
-//     session-storage only. Content scripts in this extension *could*
-//     technically read it, but the manifest only injects our content script
-//     on https://*.zendesk.com/agent/filters/*, so the attack surface is
-//     limited to that trusted page.
-//   - Loaded values are re-validated through sanitizeSettings() on every
-//     read. This matters more now than in session mode because disk-backed
-//     storage can be edited (chrome://extensions devtools, or another
-//     compromised extension the user installs). Defense in depth.
+
 const defaultSettings = {
   breachThreshold: 60,
   warningThreshold: 20,
@@ -54,17 +21,10 @@ const defaultSettings = {
   isDarkMode: false,
   breachColor: '#ff0000',
   warningColor: '#ffcc00',
-  // Master on/off toggle from the popup. Currently UI-only (doesn't gate
-  // processScan), but persisted so the popup re-opens in the same state the
-  // user left it.
   isEnabled: true,
-  // How often the content script re-scans the queue for new rows, in seconds.
-  // Clamped to 1..3600 in sanitizeSettings.
   refreshFrequency: 30,
 };
 
-// State lives only in service worker memory; not persisted.
-// activeEntries values are derived from DOM data and treated as untrusted strings.
 const state = {
   activeEntries: new Map(),
   settings: { ...defaultSettings },
@@ -73,48 +33,118 @@ const state = {
     warningCount: 0,
     totalHanging: 0,
   },
+  runtimeAccumulatedMs: 0,
+  sessionStartedAt: null,
 };
 
-// Load settings from local storage on startup. The SW runs this every time
-// it spins up (cold start, wake from idle, browser restart), so settings
-// survive across all of those.
-//
-// `settingsReady` resolves once the first read completes. Any handler that
-// needs a fully-restored settings object should await it before responding -
-// otherwise a popup opening at the exact moment the SW wakes from idle could
-// race the async read and see defaultSettings.
-const settingsReady = new Promise((resolve) => {
-  chrome.storage.local.get('settings', (result) => {
-    if (result.settings) {
-      // SECURITY: Re-validate persisted settings before applying.
-      // chrome.storage.local is on-disk and modifiable via devtools or a
-      // compromised co-installed extension, so a stored value could be
-      // out-of-range or a totally unexpected shape. sanitizeSettings clamps
-      // numbers, validates enums, drops unknown keys, and falls back to
-      // defaults for anything malformed.
-      state.settings = sanitizeSettings({ ...state.settings, ...result.settings });
+const RUNTIME_HEARTBEAT_ALARM = 'runtime-heartbeat';
+const RUNTIME_HEARTBEAT_PERIOD_MIN = 1;
+
+// Storage keys.
+const RUNTIME_ACCUMULATED_KEY = 'runtimeAccumulatedMs';
+const RUNTIME_SESSION_KEY = 'runtimeLastActiveAt';
+
+// Cap resume gap - stale/tampered flags fall back to a fresh start.
+const RUNTIME_RESUME_MAX_GAP_MS = 5 * 60 * 1000;
+
+// Load persisted settings + accumulated runtime; popup awaits this before responding.
+const stateReady = new Promise((resolve) => {
+  chrome.storage.local.get(['settings', RUNTIME_ACCUMULATED_KEY], (localResult) => {
+    if (localResult.settings) {
+      // Re-validate on read - storage.local is disk-backed and tamperable.
+      state.settings = sanitizeSettings({ ...state.settings, ...localResult.settings });
       console.log('[ServiceWorker] Restored settings from local storage');
     } else {
       console.log('[ServiceWorker] No saved settings found - using defaults');
     }
-    resolve();
+
+    // Validate accumulated runtime: finite, non-negative, under 100-year ceiling.
+    const persistedAccum = localResult[RUNTIME_ACCUMULATED_KEY];
+    if (
+      typeof persistedAccum === 'number' &&
+      Number.isFinite(persistedAccum) &&
+      persistedAccum >= 0 &&
+      persistedAccum < 3.15e15
+    ) {
+      state.runtimeAccumulatedMs = persistedAccum;
+    } else {
+      state.runtimeAccumulatedMs = 0;
+      if (persistedAccum !== undefined) {
+        console.warn('[ServiceWorker] Rejected malformed runtimeAccumulatedMs:', persistedAccum);
+      }
+    }
+
+    // storage.session flag is wiped on browser close -> distinguishes resume vs. fresh launch.
+    chrome.storage.session.get(RUNTIME_SESSION_KEY, (sessionResult) => {
+      const now = Date.now();
+      const lastActiveAt = sessionResult[RUNTIME_SESSION_KEY];
+      if (
+        typeof lastActiveAt === 'number' &&
+        Number.isFinite(lastActiveAt) &&
+        lastActiveAt > 0 &&
+        lastActiveAt <= now &&
+        now - lastActiveAt < RUNTIME_RESUME_MAX_GAP_MS
+      ) {
+        // Resume: count the SW-eviction gap on next flush.
+        state.sessionStartedAt = lastActiveAt;
+        console.log('[ServiceWorker] Resuming runtime tracking from', new Date(lastActiveAt).toISOString());
+      } else {
+        // Fresh browser launch - don't count anything before now.
+        state.sessionStartedAt = now;
+        console.log('[ServiceWorker] Fresh runtime session');
+      }
+      // Refresh the session flag so an immediate eviction still resumes.
+      chrome.storage.session.set({ [RUNTIME_SESSION_KEY]: now }).catch(() => {});
+
+      // Heartbeat alarm (idempotent).
+      chrome.alarms.create(RUNTIME_HEARTBEAT_ALARM, {
+        periodInMinutes: RUNTIME_HEARTBEAT_PERIOD_MIN,
+      });
+
+      resolve();
+    });
   });
 });
 
-// ---------- SECURITY: validation helpers ----------
+// Flush in-memory delta to disk and re-anchor the tracking window.
+function flushRuntime() {
+  if (state.sessionStartedAt === null) return;
+  const now = Date.now();
+  // Clock-skew guard against NTP correction / user clock change.
+  const delta = Math.max(0, now - state.sessionStartedAt);
+  state.runtimeAccumulatedMs += delta;
+  state.sessionStartedAt = now;
+  chrome.storage.local.set({ [RUNTIME_ACCUMULATED_KEY]: state.runtimeAccumulatedMs }).catch((err) => {
+    console.warn('[ServiceWorker] runtime flush to local failed', err);
+  });
+  chrome.storage.session.set({ [RUNTIME_SESSION_KEY]: now }).catch(() => {});
+}
 
-// Verify a message originated from one of our own content scripts on a trusted URL.
-// Returns true for popup/internal messages (where sender.tab is undefined).
+// Heartbeat: persist a snapshot every minute and wake SW from idle.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RUNTIME_HEARTBEAT_ALARM) {
+    flushRuntime();
+  }
+});
+
+// Best-effort final flush on SW termination (not guaranteed in MV3).
+chrome.runtime.onSuspend.addListener(() => {
+  flushRuntime();
+});
+
+// One-time cleanup of the deprecated `runtimeStartedAt` key.
+chrome.storage.local.remove('runtimeStartedAt').catch(() => {});
+
+//#region------SECURITY HELPERS----------------
+
+// Allow popup/SW (no tab) and content scripts on trusted Zendesk URLs.
 function isTrustedSender(sender) {
   if (!sender) return false;
-  // Sender must be the same extension
   if (sender.id && sender.id !== chrome.runtime.id) {
     console.warn('[ServiceWorker] Rejected message from foreign extension:', sender.id);
     return false;
   }
-  // Internal messages (popup, service worker self) have no tab; allow these.
   if (!sender.tab) return true;
-  // Tab-originated messages must come from a trusted URL.
   const url = sender.tab.url || sender.url || '';
   if (!TRUSTED_URL_PATTERN.test(url)) {
     console.warn('[ServiceWorker] Rejected message from untrusted URL:', url.slice(0, 80));
@@ -132,7 +162,7 @@ function sanitizeEntryId(id) {
 
 function sanitizeCandidates(raw) {
   if (!Array.isArray(raw)) return null;
-  // Cap at 500 to prevent memory exhaustion via floods of fake candidates.
+  // Cap at 500 to prevent memory-exhaustion floods.
   if (raw.length > 500) {
     console.warn('[ServiceWorker] SCAN_RESULT exceeded candidate cap, truncating');
     raw = raw.slice(0, 500);
@@ -150,7 +180,7 @@ function sanitizeCandidates(raw) {
 
 function sanitizeTimestamp(ts) {
   if (typeof ts !== 'number' || !isFinite(ts) || ts <= 0) return Date.now();
-  // Clamp absurd timestamps (more than 1 minute skewed from now)
+  // Clamp absurd timestamps (>1 minute skew).
   const now = Date.now();
   if (Math.abs(ts - now) > 60_000) return now;
   return ts;
@@ -161,14 +191,14 @@ function clampNumber(v, min, max, fallback) {
   return Math.max(min, Math.min(max, v));
 }
 
-// Validate and clamp settings before applying them. Unknown keys are dropped.
+// Clamp/validate settings; unknown keys dropped.
 function sanitizeSettings(raw) {
   const out = { ...defaultSettings };
   if (!raw || typeof raw !== 'object') return out;
 
   out.breachThreshold = clampNumber(raw.breachThreshold, 1, 86400, defaultSettings.breachThreshold);
   out.warningThreshold = clampNumber(raw.warningThreshold, 0, 86400, defaultSettings.warningThreshold);
-  // Warning must be <= breach
+  // Warning must be <= breach.
   if (out.warningThreshold > out.breachThreshold) {
     out.warningThreshold = out.breachThreshold;
   }
@@ -178,29 +208,24 @@ function sanitizeSettings(raw) {
   out.soundType = ALLOWED_SOUND_TYPES.has(raw.soundType) ? raw.soundType : defaultSettings.soundType;
   out.breachColor = HEX_COLOR_PATTERN.test(raw.breachColor) ? raw.breachColor : defaultSettings.breachColor;
   out.warningColor = HEX_COLOR_PATTERN.test(raw.warningColor) ? raw.warningColor : defaultSettings.warningColor;
-  // isEnabled: strict boolean coerce, default = true (matches popup default).
-  // Treating only `=== false` as off (rather than `!== true`) so an absent
-  // or malformed key falls back to enabled rather than silently disabling.
+  // Default = enabled (only explicit `false` disables).
   out.isEnabled = raw.isEnabled === false ? false : true;
-  // refreshFrequency: clamp to 1..3600 seconds. 0 would peg CPU; >1h is
-  // meaningless for a queue-monitor refresh and likely indicates a bad
-  // value coming from somewhere unexpected.
+  // 1..3600s - 0 would peg CPU, >1h is meaningless.
   out.refreshFrequency = clampNumber(raw.refreshFrequency, 1, 3600, defaultSettings.refreshFrequency);
   return out;
 }
 
-// ---------- broadcasting ----------
+//#endregion------SECURITY HELPERS----------------
 
-// Send a message to the active tab, but only if its URL is a trusted Zendesk page.
+//#region------BROADCASTING----------------
+
+// Only sends to the active tab when its URL matches the trusted pattern.
 function sendToActiveTrustedTab(payload) {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (!tabs.length) return;
     const tab = tabs[0];
     const url = tab.url || '';
-    if (!TRUSTED_URL_PATTERN.test(url)) {
-      // Active tab isn't Zendesk; don't leak chat state to unrelated pages.
-      return;
-    }
+    if (!TRUSTED_URL_PATTERN.test(url)) return;
     chrome.tabs.sendMessage(tab.id, payload).catch((err) => {
       console.error('[ServiceWorker] Failed to send', payload.type, 'to content script', err);
     });
@@ -264,40 +289,37 @@ function processScan(candidates, timestamp) {
     };
   });
 
-  // Clean up removed entries
+  // Drop entries no longer in the queue.
   for (const [id] of state.activeEntries) {
     if (!seenThisPass.has(id)) {
       state.activeEntries.delete(id);
     } else if (!rowUpdates[id]) {
-      // Entry still exists but wasn't in this scan, shouldn't happen
       rowUpdates[id] = { timer: undefined, warning: false, overdue: false };
     }
   }
 
-  // Update metrics
   state.metrics.breachedCount = activeBreaches;
   state.metrics.warningCount = activeWarnings;
   state.metrics.totalHanging = state.activeEntries.size;
 
-  // Broadcast to popup (popup is internal, no tab URL check needed)
+  // Popup is internal; silent-fail if not open.
   chrome.runtime.sendMessage({
     type: 'STATE_UPDATE',
     metrics: state.metrics,
-  }).catch(() => {
-    // Popup might not be open - this is normal, do not log as error
-  });
+  }).catch(() => {});
 
-  // Broadcast to content script (only if active tab is trusted Zendesk page)
   sendToActiveTrustedTab({
     type: 'UPDATE_ROWS',
     updates: rowUpdates,
   });
 }
 
-// ---------- message handlers ----------
+//#endregion------BROADCASTING----------------
+
+//#region------MESSAGE HANDLERS----------------
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  // SECURITY: Reject all messages from untrusted senders before doing any work.
+  // Reject untrusted senders before any work.
   if (!isTrustedSender(sender)) {
     sendResponse({ ok: false, error: 'untrusted_sender' });
     return;
@@ -320,22 +342,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({ ok: true });
   } else if (request.type === 'SETTINGS_CHANGED') {
     console.log('[ServiceWorker] SETTINGS_CHANGED message received', request.settings);
-    // SECURITY: Sanitize incoming settings - clamp numbers, validate enums, drop unknown keys.
+    // Clamp numbers, validate enums, drop unknown keys.
     const safeSettings = sanitizeSettings({ ...state.settings, ...(request.settings || {}) });
     state.settings = safeSettings;
-    // Persist to local storage so settings survive popup close, SW idle
-    // eviction, browser restart, and OS reboot. Cleared only on uninstall
-    // or explicit clear from chrome://settings.
     chrome.storage.local.set({ settings: state.settings }).catch((err) => {
       console.warn('[ServiceWorker] storage.local.set failed', err);
     });
 
-    // Reset alerted flags so sounds can trigger again
+    // Reset alerted flags so new thresholds can re-trigger sounds.
     state.activeEntries.forEach((entry) => {
       entry.alerted = false;
     });
 
-    // Re-evaluate all chats
+    // Re-evaluate all chats against the new thresholds.
     const candidates = Array.from(state.activeEntries.entries()).map(([id, entry]) => ({
       entryId: id,
       source: entry.source,
@@ -347,27 +366,40 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     state.activeEntries.clear();
     state.metrics = { breachedCount: 0, warningCount: 0, totalHanging: 0 };
 
+    // Zero accumulated runtime and re-anchor the window; persist immediately.
+    const now = Date.now();
+    state.runtimeAccumulatedMs = 0;
+    state.sessionStartedAt = now;
+    chrome.storage.local.set({ [RUNTIME_ACCUMULATED_KEY]: 0 }).catch((err) => {
+      console.warn('[ServiceWorker] Failed to persist reset accumulated', err);
+    });
+    chrome.storage.session.set({ [RUNTIME_SESSION_KEY]: now }).catch(() => {});
+
     chrome.runtime.sendMessage({
       type: 'STATE_UPDATE',
       metrics: state.metrics,
+      runtimeAccumulatedMs: state.runtimeAccumulatedMs,
+      sessionStartedAt: state.sessionStartedAt,
     }).catch(() => {});
 
-    sendResponse({ ok: true });
+    sendResponse({
+      ok: true,
+      runtimeAccumulatedMs: state.runtimeAccumulatedMs,
+      sessionStartedAt: state.sessionStartedAt,
+    });
   } else if (request.type === 'PLAY_SOUND') {
     console.log('[ServiceWorker] PLAY_SOUND message received', { soundType: request.soundType, volume: request.volume });
     broadcastSoundAlert(request.soundType, request.volume);
     sendResponse({ ok: true });
   } else if (request.type === 'REQUEST_CURRENT_STATE') {
     console.log('[ServiceWorker] REQUEST_CURRENT_STATE message received');
-    // Defer the response until the session-storage read has populated
-    // state.settings. Otherwise a popup opening on a cold SW could see
-    // defaultSettings and the user's persisted edits would flash to defaults
-    // for one render before being replaced. `return true` keeps the message
-    // channel open for the async sendResponse - required by MV3.
-    settingsReady.then(() => {
+    // Await stateReady so cold-SW popups don't see defaults; `return true` keeps MV3 channel open.
+    stateReady.then(() => {
       sendResponse({
         metrics: state.metrics,
         settings: state.settings,
+        runtimeAccumulatedMs: state.runtimeAccumulatedMs,
+        sessionStartedAt: state.sessionStartedAt,
       });
     });
     return true;
@@ -375,5 +407,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({ ok: false, error: 'unknown_type' });
   }
 });
+
+//#endregion------MESSAGE HANDLERS----------------
 
 console.log('[Chat Tracker] Service Worker loaded');

@@ -26,6 +26,9 @@ import {
 } from "lucide-react"
 
 export function Popup() {
+
+  //#region------STATE VARIABLES AND DEFAULTS----------------
+
   // Customization
   const [isDarkMode, setIsDarkMode] = useState(false)
   const [breachColor, setBreachColor] = useState("#ef4444")
@@ -33,11 +36,13 @@ export function Popup() {
 
   // Status
   const [isEnabled, setIsEnabled] = useState(true)
-  // Audit finding #2 (CRITICAL): initial values must be the empty/zero
-  // state, not mock numbers. Real values arrive from the service worker on
-  // mount via REQUEST_CURRENT_STATE and on every STATE_UPDATE thereafter.
+
   const [breachedChats, setBreachedChats] = useState(0)
   const [warningChats, setWarningChats] = useState(0)
+
+  // Runtime
+  const [runtimeAccumulatedMs, setRuntimeAccumulatedMs] = useState(0)
+  const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null)
   const [runtime, setRuntime] = useState("00:00:00")
 
   // Chat Refresh
@@ -52,12 +57,19 @@ export function Popup() {
   const [volume, setVolume] = useState([75])
   const [soundType, setSoundType] = useState("chime")
 
+  //#endregion------STATE VARIABLES AND DEFAULTS----------------
+
   useEffect(() => {
-    // Request current state from service worker
     chrome.runtime.sendMessage({ type: 'REQUEST_CURRENT_STATE' }, (response) => {
       if (response?.metrics) {
         setBreachedChats(response.metrics.breachedCount)
         setWarningChats(response.metrics.warningCount)
+      }
+      if (typeof response?.runtimeAccumulatedMs === 'number') {
+        setRuntimeAccumulatedMs(response.runtimeAccumulatedMs)
+      }
+      if (typeof response?.sessionStartedAt === 'number') {
+        setSessionStartedAt(response.sessionStartedAt)
       }
       if (response?.settings) {
         const s = response.settings
@@ -69,19 +81,22 @@ export function Popup() {
         setIsDarkMode(s.isDarkMode ?? false)
         setBreachColor(s.breachColor ?? '#ef4444')
         setWarningColor(s.warningColor ?? '#f59e0b')
-        // Persistence: the master toggle and the chat-refresh frequency
-        // also round-trip through the service worker now, so the popup
-        // re-opens in exactly the state the user left it.
         setIsEnabled(s.isEnabled ?? true)
         setRefreshFrequency(s.refreshFrequency?.toString() || '30')
       }
     })
 
-    // Listen for state updates from service worker
+    // listens for state updates from the service worker
     const handleMessage = (request: any) => {
       if (request.type === 'STATE_UPDATE') {
         setBreachedChats(request.metrics.breachedCount)
         setWarningChats(request.metrics.warningCount)
+        if (typeof request.runtimeAccumulatedMs === 'number') {
+          setRuntimeAccumulatedMs(request.runtimeAccumulatedMs)
+        }
+        if (typeof request.sessionStartedAt === 'number') {
+          setSessionStartedAt(request.sessionStartedAt)
+        }
       }
     }
 
@@ -92,20 +107,29 @@ export function Popup() {
     }
   }, [])
 
-  // ---- Audit finding #8 (MEDIUM): UI-side validation -----------------------
-  //
-  // The newUI design treats the threshold + refresh fields as strict digit
-  // strings (no negatives, no decimals, no e-notation), and surfaces three
-  // visual states:
-  //   - null    : neutral (during typing / empty)
-  //   - valid   : no decoration
-  //   - warning : amber ring + amber message ("equal values: only breach
-  //               will count")
-  //   - invalid : red ring + red message
-  //
-  // We still gate SETTINGS_CHANGED on a strict validity check so the service
-  // worker never receives mid-edit garbage. Equal values are allowed
-  // (warning) and ARE saved, matching the newUI behavior.
+  useEffect(() => {
+    if (sessionStartedAt === null) {
+      setRuntime("00:00:00")
+      return
+    }
+    const pad = (n: number) => n.toString().padStart(2, '0')
+    const format = () => {
+      const liveMs = Math.max(0, Date.now() - sessionStartedAt)
+      const totalMs = runtimeAccumulatedMs + liveMs
+      const totalSeconds = Math.floor(totalMs / 1000)
+      const hours = Math.floor(totalSeconds / 3600)
+      const minutes = Math.floor((totalSeconds % 3600) / 60)
+      const seconds = totalSeconds % 60
+      return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`
+    }
+    setRuntime(format())
+    const intervalId = window.setInterval(() => {
+      setRuntime(format())
+    }, 1000)
+    return () => window.clearInterval(intervalId)
+  }, [runtimeAccumulatedMs, sessionStartedAt])
+
+//#region------VALUE VALIDATION----------------
 
   const isValidNumber = (value: string): boolean => {
     if (value === "") return true // allow empty while typing
@@ -129,6 +153,7 @@ export function Popup() {
   } => {
     const breachValid = isValidNumber(breachThreshold)
     const warningValid = isValidNumber(warningThreshold)
+
 
     if (!breachValid)
       return { breach: "invalid", warning: getInputValidationState(warningThreshold), message: "Invalid breach value" }
@@ -167,13 +192,13 @@ export function Popup() {
   const thresholdState = getThresholdValidationState()
   const refreshState = getRefreshValidationState()
 
-  // SETTINGS_CHANGED is only suppressed for hard-invalid states (red). Amber
-  // "warning" (equal values) is still a saveable config.
   const thresholdsSendable =
     thresholdState.breach !== "invalid" &&
     thresholdState.warning !== "invalid" &&
     breachThreshold !== "" &&
     warningThreshold !== ""
+
+//#endregion------END OF VALUE VALIDATION----------------
 
   const getInputClassName = (state: ValState, baseClass: string): string => {
     if (state === "invalid")
@@ -184,10 +209,6 @@ export function Popup() {
   }
 
   useEffect(() => {
-    // Send settings changes to service worker - but only if numeric
-    // thresholds are valid. Otherwise the popup is showing an in-progress
-    // edit (e.g. the user just cleared the field to retype) and we'd be
-    // sending the SW garbage that its sanitizer would just clamp anyway.
     if (!thresholdsSendable) {
       console.log('[Popup] SETTINGS_CHANGED suppressed - invalid thresholds', {
         breachThreshold, warningThreshold,
@@ -206,17 +227,20 @@ export function Popup() {
         breachColor,
         warningColor,
         refreshFrequency: parseInt(refreshFrequency, 10) || 30,
-        // isEnabled is the master on/off toggle; round-tripping it through
-        // the SW makes the popup re-open in the same state.
         isEnabled,
       },
     }).catch(() => {})
   }, [breachThreshold, warningThreshold, isMuted, volume, soundType, isDarkMode, breachColor, warningColor, refreshFrequency, isEnabled, thresholdsSendable])
 
+//#region------SETTINGS STATE CHANGE HANDLERS----------------
+
   const handleReset = () => {
     console.log('[Popup] Reset button activated')
     setBreachedChats(0)
     setWarningChats(0)
+    const now = Date.now()
+    setRuntimeAccumulatedMs(0)
+    setSessionStartedAt(now)
     setRuntime("00:00:00")
     console.log('[Popup] Reset core logic: sending RESET message to service worker')
     chrome.runtime.sendMessage({ type: 'RESET' }).catch(() => {})
@@ -232,6 +256,13 @@ export function Popup() {
     }).catch(() => {})
   }
 
+  const handleBreachThresholdBlur = (e: React.FocusEvent<HTMLInputElement>) => {
+    if (e.target.value === "" || e.target.value === "0") {
+      console.log('[Popup] Breach Threshold blur snap to "2"')
+      setBreachThreshold("2")
+    }
+  }
+
   const handleEnabledChange = (checked: boolean) => {
     console.log('[Popup] Enabled switch activated', { checked })
     setIsEnabled(checked)
@@ -242,13 +273,6 @@ export function Popup() {
     console.log('[Popup] Breach Threshold input activated', { value: e.target.value })
     setBreachThreshold(e.target.value)
     console.log('[Popup] Breach Threshold core logic: state updated to', e.target.value)
-  }
-
-  const handleBreachThresholdBlur = (e: React.FocusEvent<HTMLInputElement>) => {
-    if (e.target.value === "" || e.target.value === "0") {
-      console.log('[Popup] Breach Threshold blur snap to "2"')
-      setBreachThreshold("2")
-    }
   }
 
   const handleWarningThresholdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -312,6 +336,8 @@ export function Popup() {
     setWarningColor(e.target.value)
     console.log('[Popup] Warning Color core logic: state updated to', e.target.value)
   }
+
+//#endregion------END OF SETTINGS STATE CHANGE HANDLERS----------------
 
   return (
     <div
