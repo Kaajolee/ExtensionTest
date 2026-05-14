@@ -18,8 +18,33 @@ const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 // SECURITY: Allowed sound type values.
 const ALLOWED_SOUND_TYPES = new Set(['beep', 'chime', 'alert']);
 
-// WARNING: Settings are persisted in chrome.storage.local in plaintext.
-// Do not store secrets, API tokens, credentials, or PII here.
+// SETTINGS PERSISTENCE
+// ---------------------
+// Settings are persisted in `chrome.storage.local` for long-term, single-user
+// use. Behaviour:
+//   - Survives:  popup close, service-worker idle eviction, tab close,
+//                extension reload, browser restart, OS reboot. Settings
+//                stick around until the user uninstalls the extension or
+//                clears extension data manually.
+//   - Cleared:   uninstall, "Clear extension data" in chrome://settings,
+//                or an explicit `chrome.storage.local.clear()` call.
+//
+// SECURITY notes:
+//   - `chrome.storage.local` writes to disk in PLAINTEXT (the extension's
+//     profile directory). It is forensically recoverable after the browser
+//     exits. Treat anything stored here as readable by anyone with file-
+//     system access to the user's profile.
+//   - Do NOT store secrets, API tokens, credentials, or PII here. Only UI
+//     preferences and thresholds.
+//   - `chrome.storage.local` does NOT support setAccessLevel - that API is
+//     session-storage only. Content scripts in this extension *could*
+//     technically read it, but the manifest only injects our content script
+//     on https://*.zendesk.com/agent/filters/*, so the attack surface is
+//     limited to that trusted page.
+//   - Loaded values are re-validated through sanitizeSettings() on every
+//     read. This matters more now than in session mode because disk-backed
+//     storage can be edited (chrome://extensions devtools, or another
+//     compromised extension the user installs). Defense in depth.
 const defaultSettings = {
   breachThreshold: 60,
   warningThreshold: 20,
@@ -29,6 +54,13 @@ const defaultSettings = {
   isDarkMode: false,
   breachColor: '#ff0000',
   warningColor: '#ffcc00',
+  // Master on/off toggle from the popup. Currently UI-only (doesn't gate
+  // processScan), but persisted so the popup re-opens in the same state the
+  // user left it.
+  isEnabled: true,
+  // How often the content script re-scans the queue for new rows, in seconds.
+  // Clamped to 1..3600 in sanitizeSettings.
+  refreshFrequency: 30,
 };
 
 // State lives only in service worker memory; not persisted.
@@ -43,13 +75,30 @@ const state = {
   },
 };
 
-// Load settings from storage on startup
-chrome.storage.local.get('settings', (result) => {
-  if (result.settings) {
-    // SECURITY: Re-validate persisted settings to guard against tampering
-    // (chrome.storage.local is readable/writable by the extension context).
-    state.settings = sanitizeSettings({ ...state.settings, ...result.settings });
-  }
+// Load settings from local storage on startup. The SW runs this every time
+// it spins up (cold start, wake from idle, browser restart), so settings
+// survive across all of those.
+//
+// `settingsReady` resolves once the first read completes. Any handler that
+// needs a fully-restored settings object should await it before responding -
+// otherwise a popup opening at the exact moment the SW wakes from idle could
+// race the async read and see defaultSettings.
+const settingsReady = new Promise((resolve) => {
+  chrome.storage.local.get('settings', (result) => {
+    if (result.settings) {
+      // SECURITY: Re-validate persisted settings before applying.
+      // chrome.storage.local is on-disk and modifiable via devtools or a
+      // compromised co-installed extension, so a stored value could be
+      // out-of-range or a totally unexpected shape. sanitizeSettings clamps
+      // numbers, validates enums, drops unknown keys, and falls back to
+      // defaults for anything malformed.
+      state.settings = sanitizeSettings({ ...state.settings, ...result.settings });
+      console.log('[ServiceWorker] Restored settings from local storage');
+    } else {
+      console.log('[ServiceWorker] No saved settings found - using defaults');
+    }
+    resolve();
+  });
 });
 
 // ---------- SECURITY: validation helpers ----------
@@ -129,6 +178,14 @@ function sanitizeSettings(raw) {
   out.soundType = ALLOWED_SOUND_TYPES.has(raw.soundType) ? raw.soundType : defaultSettings.soundType;
   out.breachColor = HEX_COLOR_PATTERN.test(raw.breachColor) ? raw.breachColor : defaultSettings.breachColor;
   out.warningColor = HEX_COLOR_PATTERN.test(raw.warningColor) ? raw.warningColor : defaultSettings.warningColor;
+  // isEnabled: strict boolean coerce, default = true (matches popup default).
+  // Treating only `=== false` as off (rather than `!== true`) so an absent
+  // or malformed key falls back to enabled rather than silently disabling.
+  out.isEnabled = raw.isEnabled === false ? false : true;
+  // refreshFrequency: clamp to 1..3600 seconds. 0 would peg CPU; >1h is
+  // meaningless for a queue-monitor refresh and likely indicates a bad
+  // value coming from somewhere unexpected.
+  out.refreshFrequency = clampNumber(raw.refreshFrequency, 1, 3600, defaultSettings.refreshFrequency);
   return out;
 }
 
@@ -266,7 +323,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // SECURITY: Sanitize incoming settings - clamp numbers, validate enums, drop unknown keys.
     const safeSettings = sanitizeSettings({ ...state.settings, ...(request.settings || {}) });
     state.settings = safeSettings;
-    chrome.storage.local.set({ settings: state.settings });
+    // Persist to local storage so settings survive popup close, SW idle
+    // eviction, browser restart, and OS reboot. Cleared only on uninstall
+    // or explicit clear from chrome://settings.
+    chrome.storage.local.set({ settings: state.settings }).catch((err) => {
+      console.warn('[ServiceWorker] storage.local.set failed', err);
+    });
 
     // Reset alerted flags so sounds can trigger again
     state.activeEntries.forEach((entry) => {
@@ -297,10 +359,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({ ok: true });
   } else if (request.type === 'REQUEST_CURRENT_STATE') {
     console.log('[ServiceWorker] REQUEST_CURRENT_STATE message received');
-    sendResponse({
-      metrics: state.metrics,
-      settings: state.settings,
+    // Defer the response until the session-storage read has populated
+    // state.settings. Otherwise a popup opening on a cold SW could see
+    // defaultSettings and the user's persisted edits would flash to defaults
+    // for one render before being replaced. `return true` keeps the message
+    // channel open for the async sendResponse - required by MV3.
+    settingsReady.then(() => {
+      sendResponse({
+        metrics: state.metrics,
+        settings: state.settings,
+      });
     });
+    return true;
   } else {
     sendResponse({ ok: false, error: 'unknown_type' });
   }
