@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -26,6 +26,9 @@ import {
 } from "lucide-react"
 
 export function Popup() {
+
+  //#region------STATE VARIABLES AND DEFAULTS----------------
+
   // Customization
   const [isDarkMode, setIsDarkMode] = useState(false)
   const [breachColor, setBreachColor] = useState("#ef4444")
@@ -33,9 +36,14 @@ export function Popup() {
 
   // Status
   const [isEnabled, setIsEnabled] = useState(true)
-  const [breachedChats, setBreachedChats] = useState(3)
-  const [warningChats, setWarningChats] = useState(7)
-  const [runtime, setRuntime] = useState("02:34:15")
+
+  const [breachedChats, setBreachedChats] = useState(0)
+  const [warningChats, setWarningChats] = useState(0)
+
+  // Runtime
+  const [runtimeAccumulatedMs, setRuntimeAccumulatedMs] = useState(0)
+  const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null)
+  const [runtime, setRuntime] = useState("00:00:00")
 
   // Chat Refresh
   const [refreshFrequency, setRefreshFrequency] = useState("30")
@@ -49,15 +57,287 @@ export function Popup() {
   const [volume, setVolume] = useState([75])
   const [soundType, setSoundType] = useState("chime")
 
+  //#endregion------STATE VARIABLES AND DEFAULTS----------------
+
+  useEffect(() => {
+    chrome.runtime.sendMessage({ type: 'REQUEST_CURRENT_STATE' }, (response) => {
+      if (response?.metrics) {
+        setBreachedChats(response.metrics.breachedCount)
+        setWarningChats(response.metrics.warningCount)
+      }
+      if (typeof response?.runtimeAccumulatedMs === 'number') {
+        setRuntimeAccumulatedMs(response.runtimeAccumulatedMs)
+      }
+      if (typeof response?.sessionStartedAt === 'number') {
+        setSessionStartedAt(response.sessionStartedAt)
+      }
+      if (response?.settings) {
+        const s = response.settings
+        setBreachThreshold(s.breachThreshold?.toString() || '60')
+        setWarningThreshold(s.warningThreshold?.toString() || '20')
+        setIsMuted(s.isMuted ?? false)
+        setVolume([s.volume ?? 25])
+        setSoundType(s.soundType ?? 'beep')
+        setIsDarkMode(s.isDarkMode ?? false)
+        setBreachColor(s.breachColor ?? '#ef4444')
+        setWarningColor(s.warningColor ?? '#f59e0b')
+        setIsEnabled(s.isEnabled ?? true)
+        setRefreshFrequency(s.refreshFrequency?.toString() || '30')
+      }
+    })
+
+    // listens for state updates from the service worker
+    const handleMessage = (request: any) => {
+      if (request.type === 'STATE_UPDATE') {
+        setBreachedChats(request.metrics.breachedCount)
+        setWarningChats(request.metrics.warningCount)
+        if (typeof request.runtimeAccumulatedMs === 'number') {
+          setRuntimeAccumulatedMs(request.runtimeAccumulatedMs)
+        }
+        if (typeof request.sessionStartedAt === 'number') {
+          setSessionStartedAt(request.sessionStartedAt)
+        }
+      }
+    }
+
+    chrome.runtime.onMessage.addListener(handleMessage)
+
+    return () => {
+      chrome.runtime.onMessage.removeListener(handleMessage)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (sessionStartedAt === null) {
+      setRuntime("00:00:00")
+      return
+    }
+    const pad = (n: number) => n.toString().padStart(2, '0')
+    const format = () => {
+      const liveMs = Math.max(0, Date.now() - sessionStartedAt)
+      const totalMs = runtimeAccumulatedMs + liveMs
+      const totalSeconds = Math.floor(totalMs / 1000)
+      const hours = Math.floor(totalSeconds / 3600)
+      const minutes = Math.floor((totalSeconds % 3600) / 60)
+      const seconds = totalSeconds % 60
+      return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`
+    }
+    setRuntime(format())
+    const intervalId = window.setInterval(() => {
+      setRuntime(format())
+    }, 1000)
+    return () => window.clearInterval(intervalId)
+  }, [runtimeAccumulatedMs, sessionStartedAt])
+
+//#region------VALUE VALIDATION----------------
+
+  const isValidNumber = (value: string): boolean => {
+    if (value === "") return true // allow empty while typing
+    if (!/^\d+$/.test(value)) return false
+    const n = Number(value)
+    return Number.isFinite(n) && n >= 0
+  }
+
+  type ValState = "valid" | "invalid" | "warning" | null
+
+  const getInputValidationState = (value: string): ValState => {
+    if (value === "") return null
+    if (!isValidNumber(value)) return "invalid"
+    return "valid"
+  }
+
+  const getThresholdValidationState = (): {
+    breach: ValState
+    warning: ValState
+    message: string | null
+  } => {
+    const breachValid = isValidNumber(breachThreshold)
+    const warningValid = isValidNumber(warningThreshold)
+
+
+    if (!breachValid)
+      return { breach: "invalid", warning: getInputValidationState(warningThreshold), message: "Invalid breach value" }
+    if (!warningValid)
+      return { breach: getInputValidationState(breachThreshold), warning: "invalid", message: "Invalid warning value" }
+
+    if (breachThreshold === "" || warningThreshold === "")
+      return { breach: null, warning: null, message: null }
+
+    const breachNum = Number(breachThreshold)
+    const warningNum = Number(warningThreshold)
+
+    if (breachNum === 0 && warningNum === 0)
+      return { breach: "invalid", warning: "invalid", message: "Values cannot be 0" }
+    if (breachNum === 0)
+      return { breach: "invalid", warning: getInputValidationState(warningThreshold), message: "Breach cannot be 0" }
+    if (warningNum === 0)
+      return { breach: getInputValidationState(breachThreshold), warning: "invalid", message: "Warning cannot be 0" }
+
+    if (breachNum < warningNum)
+      return { breach: "invalid", warning: "invalid", message: "Breach cannot be less than the warning" }
+
+    if (breachNum === warningNum)
+      return { breach: "warning", warning: "warning", message: "Equal values: only the breach will count" }
+
+    return { breach: "valid", warning: "valid", message: null }
+  }
+
+  const getRefreshValidationState = (): "valid" | "invalid" | null => {
+    if (refreshFrequency === "") return null
+    if (!isValidNumber(refreshFrequency)) return "invalid"
+    if (Number(refreshFrequency) === 0) return "invalid"
+    return "valid"
+  }
+
+  const thresholdState = getThresholdValidationState()
+  const refreshState = getRefreshValidationState()
+
+  const thresholdsSendable =
+    thresholdState.breach !== "invalid" &&
+    thresholdState.warning !== "invalid" &&
+    breachThreshold !== "" &&
+    warningThreshold !== ""
+
+//#endregion------END OF VALUE VALIDATION----------------
+
+  const getInputClassName = (state: ValState, baseClass: string): string => {
+    if (state === "invalid")
+      return `${baseClass} ring-2 ring-red-500 focus-visible:ring-red-500`
+    if (state === "warning")
+      return `${baseClass} ring-2 ring-amber-500 focus-visible:ring-amber-500`
+    return baseClass
+  }
+
+  useEffect(() => {
+    if (!thresholdsSendable) {
+      console.log('[Popup] SETTINGS_CHANGED suppressed - invalid thresholds', {
+        breachThreshold, warningThreshold,
+      })
+      return
+    }
+    chrome.runtime.sendMessage({
+      type: 'SETTINGS_CHANGED',
+      settings: {
+        breachThreshold: parseInt(breachThreshold, 10),
+        warningThreshold: parseInt(warningThreshold, 10),
+        isMuted,
+        volume: volume[0],
+        soundType,
+        isDarkMode,
+        breachColor,
+        warningColor,
+        refreshFrequency: parseInt(refreshFrequency, 10) || 30,
+        isEnabled,
+      },
+    }).catch(() => {})
+  }, [breachThreshold, warningThreshold, isMuted, volume, soundType, isDarkMode, breachColor, warningColor, refreshFrequency, isEnabled, thresholdsSendable])
+
+//#region------SETTINGS STATE CHANGE HANDLERS----------------
+
   const handleReset = () => {
+    console.log('[Popup] Reset button activated')
     setBreachedChats(0)
     setWarningChats(0)
+    const now = Date.now()
+    setRuntimeAccumulatedMs(0)
+    setSessionStartedAt(now)
     setRuntime("00:00:00")
+    console.log('[Popup] Reset core logic: sending RESET message to service worker')
+    chrome.runtime.sendMessage({ type: 'RESET' }).catch(() => {})
   }
 
   const handlePlaySound = () => {
-    console.log("Playing sound:", soundType)
+    console.log('[Popup] Play Sound button activated')
+    console.log('[Popup] Play Sound core logic: sending PLAY_SOUND message', { soundType, volume: volume[0] })
+    chrome.runtime.sendMessage({
+      type: 'PLAY_SOUND',
+      soundType,
+      volume: volume[0],
+    }).catch(() => {})
   }
+
+  const handleBreachThresholdBlur = (e: React.FocusEvent<HTMLInputElement>) => {
+    if (e.target.value === "" || e.target.value === "0") {
+      console.log('[Popup] Breach Threshold blur snap to "2"')
+      setBreachThreshold("2")
+    }
+  }
+
+  const handleEnabledChange = (checked: boolean) => {
+    console.log('[Popup] Enabled switch activated', { checked })
+    setIsEnabled(checked)
+    console.log('[Popup] Enabled core logic: state updated to', checked)
+  }
+
+  const handleBreachThresholdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log('[Popup] Breach Threshold input activated', { value: e.target.value })
+    setBreachThreshold(e.target.value)
+    console.log('[Popup] Breach Threshold core logic: state updated to', e.target.value)
+  }
+
+  const handleWarningThresholdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log('[Popup] Warning Threshold input activated', { value: e.target.value })
+    setWarningThreshold(e.target.value)
+    console.log('[Popup] Warning Threshold core logic: state updated to', e.target.value)
+  }
+
+  const handleWarningThresholdBlur = (e: React.FocusEvent<HTMLInputElement>) => {
+    if (e.target.value === "" || e.target.value === "0") {
+      console.log('[Popup] Warning Threshold blur snap to "1"')
+      setWarningThreshold("1")
+    }
+  }
+
+  const handleRefreshFrequencyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log('[Popup] Refresh Frequency input activated', { value: e.target.value })
+    setRefreshFrequency(e.target.value)
+    console.log('[Popup] Refresh Frequency core logic: state updated to', e.target.value)
+  }
+
+  const handleRefreshFrequencyBlur = (e: React.FocusEvent<HTMLInputElement>) => {
+    if (e.target.value === "" || e.target.value === "0") {
+      console.log('[Popup] Refresh Frequency blur snap to "1"')
+      setRefreshFrequency("1")
+    }
+  }
+
+  const handleMuteChange = (checked: boolean) => {
+    console.log('[Popup] Mute switch activated', { checked })
+    setIsMuted(checked)
+    console.log('[Popup] Mute core logic: state updated to', checked)
+  }
+
+  const handleVolumeChange = (newVolume: number[]) => {
+    console.log('[Popup] Volume slider activated', { volume: newVolume[0] })
+    setVolume(newVolume)
+    console.log('[Popup] Volume core logic: state updated to', newVolume[0])
+  }
+
+  const handleSoundTypeChange = (value: string) => {
+    console.log('[Popup] Sound Type select activated', { value })
+    setSoundType(value)
+    console.log('[Popup] Sound Type core logic: state updated to', value)
+  }
+
+  const handleDarkModeChange = (checked: boolean) => {
+    console.log('[Popup] Dark Mode switch activated', { checked })
+    setIsDarkMode(checked)
+    console.log('[Popup] Dark Mode core logic: state updated to', checked)
+  }
+
+  const handleBreachColorChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log('[Popup] Breach Color picker activated', { value: e.target.value })
+    setBreachColor(e.target.value)
+    console.log('[Popup] Breach Color core logic: state updated to', e.target.value)
+  }
+
+  const handleWarningColorChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log('[Popup] Warning Color picker activated', { value: e.target.value })
+    setWarningColor(e.target.value)
+    console.log('[Popup] Warning Color core logic: state updated to', e.target.value)
+  }
+
+//#endregion------END OF SETTINGS STATE CHANGE HANDLERS----------------
 
   return (
     <div
@@ -137,233 +417,276 @@ export function Popup() {
                       >
                         {isEnabled ? "On" : "Off"}
                       </span>
-                      <Switch checked={isEnabled} onCheckedChange={setIsEnabled} />
+                      <Switch checked={isEnabled} onCheckedChange={handleEnabledChange} />
                     </div>
                   </div>
                 </div>
               </section>
 
-              {/* Section: Threshold */}
-              <section className="rounded-xl border border-border bg-card p-4">
-                <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-4">
-                  Threshold
-                </h2>
-                <div className="grid grid-cols-2 gap-6">
-                  {/* Breach Threshold */}
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <AlertCircle className="h-4 w-4 text-red-500" />
-                      <Label className="text-sm font-medium">Breach</Label>
+              {/* The rest of the settings - blurred and disabled when not enabled */}
+              <div
+                className={`space-y-4 transition-all duration-300 ${
+                  !isEnabled ? "opacity-50 pointer-events-none select-none" : ""
+                }`}
+                style={
+                  !isEnabled
+                    ? { filter: 'blur(4px)', transform: 'translateZ(0)' }
+                    : undefined
+                }
+                aria-hidden={!isEnabled}
+              >
+                {/* Section: Threshold */}
+                <section className="rounded-xl border border-border bg-card p-4">
+                  <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-4">
+                    Threshold
+                  </h2>
+                  <div className="grid grid-cols-2 gap-6">
+                    {/* Breach Threshold */}
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <AlertCircle className="h-4 w-4 text-red-500" />
+                        <Label className="text-sm font-medium">Breach</Label>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="text"
+                          inputMode="numeric"
+                          value={breachThreshold}
+                          onChange={handleBreachThresholdChange}
+                          onBlur={handleBreachThresholdBlur}
+                          aria-invalid={thresholdState.breach === "invalid"}
+                          className={getInputClassName(
+                            thresholdState.breach,
+                            "flex-1 h-9 text-center text-sm border-0 bg-muted/50",
+                          )}
+                        />
+                        <span className="text-xs text-muted-foreground">sec</span>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <Input
-                        type="number"
-                        value={breachThreshold}
-                        onChange={(e) => setBreachThreshold(e.target.value)}
-                        className="flex-1 h-9 text-center text-sm border-0 bg-muted/50"
-                        min="1"
-                      />
-                      <span className="text-xs text-muted-foreground">sec</span>
+                    {/* Warning Threshold */}
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <AlertTriangle className="h-4 w-4 text-amber-500" />
+                        <Label className="text-sm font-medium">Warning</Label>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="text"
+                          inputMode="numeric"
+                          value={warningThreshold}
+                          onChange={handleWarningThresholdChange}
+                          onBlur={handleWarningThresholdBlur}
+                          aria-invalid={thresholdState.warning === "invalid"}
+                          className={getInputClassName(
+                            thresholdState.warning,
+                            "flex-1 h-9 text-center text-sm border-0 bg-muted/50",
+                          )}
+                        />
+                        <span className="text-xs text-muted-foreground">sec</span>
+                      </div>
                     </div>
                   </div>
-                  {/* Warning Threshold */}
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <AlertTriangle className="h-4 w-4 text-amber-500" />
-                      <Label className="text-sm font-medium">Warning</Label>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Input
-                        type="number"
-                        value={warningThreshold}
-                        onChange={(e) => setWarningThreshold(e.target.value)}
-                        className="flex-1 h-9 text-center text-sm border-0 bg-muted/50"
-                        min="1"
-                      />
-                      <span className="text-xs text-muted-foreground">sec</span>
-                    </div>
-                  </div>
-                </div>
-              </section>
-
-              {/* Section: Chat Refresh */}
-              <section className="rounded-xl border border-border bg-card p-4">
-                <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-4">
-                  Chat Refresh
-                </h2>
-                <div className="flex items-center gap-3">
-                  <RefreshCw className="h-4 w-4 text-muted-foreground shrink-0" />
-                  <div className="flex-1">
-                    <Label className="text-sm font-medium">
-                      Refresh Frequency
-                    </Label>
-                    <p className="text-xs text-muted-foreground">
-                      How often to refresh the chat window
+                  {/* Validation Message */}
+                  {thresholdState.message && (
+                    <p
+                      role="alert"
+                      className={`text-xs mt-3 ${
+                        thresholdState.breach === "warning"
+                          ? "text-amber-500"
+                          : "text-red-500"
+                      }`}
+                    >
+                      {thresholdState.message}
                     </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Input
-                      type="number"
-                      value={refreshFrequency}
-                      onChange={(e) => setRefreshFrequency(e.target.value)}
-                      className="w-16 h-9 text-center text-sm border-0 bg-muted/50"
-                      min="5"
-                      max="300"
-                    />
-                    <span className="text-xs text-muted-foreground">sec</span>
-                  </div>
-                </div>
-              </section>
+                  )}
+                </section>
 
-              {/* Section: Sound */}
-              <section className="rounded-xl border border-border bg-card p-4">
-                <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-4">
-                  Sound
-                </h2>
-                <div className="space-y-5">
-                  {/* Mute Toggle */}
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      {isMuted ? (
-                        <VolumeX className="h-4 w-4 text-muted-foreground" />
-                      ) : (
-                        <Volume2 className="h-4 w-4 text-muted-foreground" />
-                      )}
-                      <div>
-                        <Label className="text-sm font-medium">Mute Sound</Label>
-                        <p className="text-xs text-muted-foreground">
-                          Disable audio
-                        </p>
-                      </div>
+                {/* Section: Chat Refresh */}
+                <section className="rounded-xl border border-border bg-card p-4">
+                  <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-4">
+                    Chat Refresh
+                  </h2>
+                  <div className="flex items-center gap-3">
+                    <RefreshCw className="h-4 w-4 text-muted-foreground shrink-0" />
+                    <div className="flex-1">
+                      <Label className="text-sm font-medium">
+                        Refresh Frequency
+                      </Label>
+                      <p className="text-xs text-muted-foreground">
+                        How often to refresh the chat window
+                      </p>
                     </div>
-                    <Switch checked={isMuted} onCheckedChange={setIsMuted} />
-                  </div>
-
-                  {/* Volume Slider */}
-                  <div
-                    className={`space-y-3 transition-opacity ${isMuted ? "opacity-40 pointer-events-none" : ""}`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <Label className="text-sm font-medium">Volume</Label>
-                      <span className="text-sm font-mono tabular-nums text-muted-foreground">
-                        {volume[0]}%
-                      </span>
-                    </div>
-                    <Slider
-                      value={volume}
-                      onValueChange={setVolume}
-                      max={100}
-                      step={1}
-                      className="w-full"
-                    />
-                  </div>
-
-                  {/* Sound Type */}
-                  <div
-                    className={`space-y-2 transition-opacity ${isMuted ? "opacity-40 pointer-events-none" : ""}`}
-                  >
-                    <Label className="text-sm font-medium">Sound Type</Label>
                     <div className="flex items-center gap-2">
-                      <Select value={soundType} onValueChange={setSoundType}>
-                        <SelectTrigger className="flex-1 h-9 border-0 bg-muted/50">
-                          <SelectValue placeholder="Select sound" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="chime">Chime</SelectItem>
-                          <SelectItem value="bell">Bell</SelectItem>
-                          <SelectItem value="alert">Alert</SelectItem>
-                          <SelectItem value="notification">Notification</SelectItem>
-                          <SelectItem value="beep">Beep</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={handlePlaySound}
-                        className="h-9 w-9 shrink-0"
-                        disabled={isMuted}
-                      >
-                        <Play className="h-4 w-4" />
-                      </Button>
+                      <Input
+                        type="text"
+                        inputMode="numeric"
+                        value={refreshFrequency}
+                        onChange={handleRefreshFrequencyChange}
+                        onBlur={handleRefreshFrequencyBlur}
+                        aria-invalid={refreshState === "invalid"}
+                        className={getInputClassName(
+                          refreshState,
+                          "w-16 h-9 text-center text-sm border-0 bg-muted/50",
+                        )}
+                      />
+                      <span className="text-xs text-muted-foreground">sec</span>
                     </div>
                   </div>
-                </div>
-              </section>
+                </section>
 
-              {/* Section: Customization */}
-              <section className="rounded-xl border border-border bg-card p-4">
-                <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-4">
-                  Customization
-                </h2>
-                <div className="space-y-5">
-                  {/* Dark Mode Toggle */}
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      {isDarkMode ? (
-                        <Moon className="h-4 w-4 text-muted-foreground" />
-                      ) : (
-                        <Sun className="h-4 w-4 text-muted-foreground" />
-                      )}
-                      <div>
-                        <Label className="text-sm font-medium">
-                          {isDarkMode ? "Dark Mode" : "Light Mode"}
-                        </Label>
-                        <p className="text-xs text-muted-foreground">
-                          Toggle appearance theme
-                        </p>
+                {/* Section: Sound */}
+                <section className="rounded-xl border border-border bg-card p-4">
+                  <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-4">
+                    Sound
+                  </h2>
+                  <div className="space-y-5">
+                    {/* Mute Toggle */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        {isMuted ? (
+                          <VolumeX className="h-4 w-4 text-muted-foreground" />
+                        ) : (
+                          <Volume2 className="h-4 w-4 text-muted-foreground" />
+                        )}
+                        <div>
+                          <Label className="text-sm font-medium">Mute Sound</Label>
+                          <p className="text-xs text-muted-foreground">
+                            Disable audio
+                          </p>
+                        </div>
                       </div>
+                      <Switch checked={isMuted} onCheckedChange={handleMuteChange} />
                     </div>
-                    <Switch checked={isDarkMode} onCheckedChange={setIsDarkMode} />
-                  </div>
 
-                  {/* Chat Row Visual Alerts */}
-                  <div className="space-y-3">
-                    <Label className="text-sm font-medium">
-                      Chat Row Visuals
-                    </Label>
-                    <div className="grid grid-cols-2 gap-4">
-                      {/* Breached Color */}
-                      <div className="space-y-2">
-                        <div className="flex items-center gap-2">
-                          <AlertCircle className="h-3.5 w-3.5 text-red-500" />
-                          <span className="text-xs font-medium">Breached</span>
+                    {/* Sound controls - blur when muted */}
+                    <div
+                      className={`space-y-5 transition-all duration-300 ${
+                        isMuted ? "blur-sm opacity-50 pointer-events-none" : ""
+                      }`}
+                    >
+                      {/* Volume Slider */}
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-sm font-medium">Volume</Label>
+                          <span className="text-sm font-mono tabular-nums text-muted-foreground">
+                            {volume[0]}%
+                          </span>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="color"
-                            value={breachColor}
-                            onChange={(e) => setBreachColor(e.target.value)}
-                            className="h-9 w-9 rounded-lg cursor-pointer bg-transparent border-0"
-                          />
-                          <div
-                            className="h-9 flex-1 rounded-lg"
-                            style={{ backgroundColor: breachColor }}
-                          />
-                        </div>
+                        <Slider
+                          value={volume}
+                          onValueChange={handleVolumeChange}
+                          max={100}
+                          step={1}
+                          className="w-full"
+                        />
                       </div>
-                      {/* Warning Color */}
+
+                      {/* Sound Type */}
                       <div className="space-y-2">
+                        <Label className="text-sm font-medium">Sound Type</Label>
                         <div className="flex items-center gap-2">
-                          <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
-                          <span className="text-xs font-medium">Warning</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="color"
-                            value={warningColor}
-                            onChange={(e) => setWarningColor(e.target.value)}
-                            className="h-9 w-9 rounded-lg cursor-pointer bg-transparent border-0"
-                          />
-                          <div
-                            className="h-9 flex-1 rounded-lg"
-                            style={{ backgroundColor: warningColor }}
-                          />
+                          <Select value={soundType} onValueChange={handleSoundTypeChange}>
+                            <SelectTrigger className="flex-1 h-9 border-0 bg-muted/50">
+                              <SelectValue placeholder="Select sound" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="chime">Chime</SelectItem>
+                              <SelectItem value="bell">Bell</SelectItem>
+                              <SelectItem value="alert">Alert</SelectItem>
+                              <SelectItem value="notification">Notification</SelectItem>
+                              <SelectItem value="beep">Beep</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={handlePlaySound}
+                            className="h-9 w-9 shrink-0"
+                            disabled={isMuted}
+                          >
+                            <Play className="h-4 w-4" />
+                          </Button>
                         </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              </section>
+                </section>
+
+                {/* Section: Customization */}
+                <section className="rounded-xl border border-border bg-card p-4">
+                  <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-4">
+                    Customization
+                  </h2>
+                  <div className="space-y-5">
+                    {/* Dark Mode Toggle */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        {isDarkMode ? (
+                          <Moon className="h-4 w-4 text-muted-foreground" />
+                        ) : (
+                          <Sun className="h-4 w-4 text-muted-foreground" />
+                        )}
+                        <div>
+                          <Label className="text-sm font-medium">
+                            {isDarkMode ? "Dark Mode" : "Light Mode"}
+                          </Label>
+                          <p className="text-xs text-muted-foreground">
+                            Toggle appearance theme
+                          </p>
+                        </div>
+                      </div>
+                      <Switch checked={isDarkMode} onCheckedChange={handleDarkModeChange} />
+                    </div>
+
+                    {/* Chat Row Visual Alerts */}
+                    <div className="space-y-3">
+                      <Label className="text-sm font-medium">
+                        Chat Row Visuals
+                      </Label>
+                      <div className="grid grid-cols-2 gap-4">
+                        {/* Breached Color */}
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2">
+                            <AlertCircle className="h-3.5 w-3.5 text-red-500" />
+                            <span className="text-xs font-medium">Breached</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="color"
+                              value={breachColor}
+                              onChange={handleBreachColorChange}
+                              className="h-9 w-9 rounded-lg cursor-pointer bg-transparent border-0"
+                            />
+                            <div
+                              className="h-9 flex-1 rounded-lg"
+                              style={{ backgroundColor: breachColor }}
+                            />
+                          </div>
+                        </div>
+                        {/* Warning Color */}
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2">
+                            <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
+                            <span className="text-xs font-medium">Warning</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="color"
+                              value={warningColor}
+                              onChange={handleWarningColorChange}
+                              className="h-9 w-9 rounded-lg cursor-pointer bg-transparent border-0"
+                            />
+                            <div
+                              className="h-9 flex-1 rounded-lg"
+                              style={{ backgroundColor: warningColor }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              </div>
 
               {/* Footer padding */}
               <div className="h-2" />

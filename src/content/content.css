@@ -1,0 +1,36 @@
+/* Chat Tracker - Content Script Styles */
+
+tr[data-timer-text]::after {
+  content: attr(data-timer-text);
+  position: absolute;
+  right: 20px;
+  background: #444;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-weight: bold;
+  font-size: 14px;
+  z-index: 10;
+  pointer-events: none;
+}
+
+tr[data-warning="true"] {
+  background-color: rgba(255, 204, 0, 0.2) !important;
+  border-left: 6px solid #e6b800 !important;
+}
+
+tr[data-warning="true"]::after {
+  background: #e6b800;
+  color: #222;
+}
+
+tr[data-overdue="true"] {
+  background-color: rgba(255, 0, 0, 0.15) !important;
+  border-left: 6px solid red !important;
+}
+
+tr[data-overdue="true"]::after {
+  background: red;
+  color: white;
+}

@@ -15,9 +15,15 @@ export default defineConfig({
     rollupOptions: {
       input: {
         popup: path.resolve(__dirname, "popup.html"),
+        "service-worker": path.resolve(__dirname, "src/background/service-worker.js"),
+        "content": path.resolve(__dirname, "src/content/content.js"),
       },
       output: {
-        entryFileNames: "assets/[name].js",
+        entryFileNames: (chunkInfo) => {
+          if (chunkInfo.name === "service-worker") return "[name].js";
+          if (chunkInfo.name === "content") return "[name].js";
+          return "assets/[name].js";
+        },
         chunkFileNames: "assets/[name].js",
         assetFileNames: "assets/[name].[ext]",
       },

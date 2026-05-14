@@ -5,7 +5,13 @@
       "PowerShell(npm install --no-audit --no-fund 2>&1)",
       "Bash(git checkout *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "PowerShell(gh auth status)",
+      "PowerShell($ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -Uri \"https://github.com/cli/cli/releases/download/v2.54.0/gh_2.54.0_windows_amd64.msi\" -OutFile \"$env:TEMP\\\\gh_installer.msi\"; Start-Process msiexec.exe -ArgumentList \"/i `\"$env:TEMP\\\\gh_installer.msi`\" /quiet /norestart\" -Wait; $env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\))",
+      "Bash(git push *)",
+      "PowerShell($ghPath = \"$env:LOCALAPPDATA\\\\Programs\\\\gh\"; if\\(-not \\(Test-Path $ghPath\\)\\) { New-Item -ItemType Directory -Path $ghPath -Force | Out-Null }; $ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -Uri \"https://github.com/cli/cli/releases/download/v2.54.0/gh_2.54.0_windows_amd64.zip\" -OutFile \"$env:TEMP\\\\gh.zip\"; Expand-Archive -Path \"$env:TEMP\\\\gh.zip\" -DestinationPath $ghPath -Force; $env:Path += \";$ghPath\\\\gh_2.54.0_windows_amd64\\\\bin\"; [Environment]::SetEnvironmentVariable\\(\"Path\", [Environment]::GetEnvironmentVariable\\(\"Path\"\\) + \";$ghPath\\\\gh_2.54.0_windows_amd64\\\\bin\", \"User\"\\); & \"$ghPath\\\\gh_2.54.0_windows_amd64\\\\bin\\\\gh.exe\" --version)",
+      "Bash(npm run *)",
+      "PowerShell($env:Path -split ';' | Where-Object { $_ -match 'node|npm' } | Select-Object -First 5)"
     ]
   }
 }
