@@ -92,13 +92,40 @@ export function Popup() {
     }
   }, [])
 
+  // Audit finding #8 (MEDIUM): the breach / warning <Input type="number">
+  // fields had only the HTML min="1" hint, which is purely advisory - a
+  // user can still type 0, a negative number, or a breach lower than the
+  // warning. The service worker's sanitizeSettings clamps the *stored*
+  // value, but until this validation was added, the popup would still
+  // visually accept and momentarily send garbage values.
+  //
+  // Strategy: keep the typed value in component state so the user can see
+  // what they typed (don't silently swallow keystrokes), but gate the
+  // SETTINGS_CHANGED message on a strict validity check and visually
+  // surface the invalid state.
+  const parsedBreach = parseInt(breachThreshold, 10)
+  const parsedWarning = parseInt(warningThreshold, 10)
+  const breachValid = Number.isFinite(parsedBreach) && parsedBreach > 0
+  const warningValid = Number.isFinite(parsedWarning) && parsedWarning >= 0
+  const thresholdsOrdered = breachValid && warningValid && parsedWarning < parsedBreach
+  const thresholdsValid = breachValid && warningValid && thresholdsOrdered
+
   useEffect(() => {
-    // Send settings changes to service worker
+    // Send settings changes to service worker - but only if numeric
+    // thresholds are valid. Otherwise the popup is showing an in-progress
+    // edit (e.g. the user just cleared the field to retype) and we'd be
+    // sending the SW garbage that its sanitizer would just clamp anyway.
+    if (!thresholdsValid) {
+      console.log('[Popup] SETTINGS_CHANGED suppressed - invalid thresholds', {
+        breachThreshold, warningThreshold,
+      })
+      return
+    }
     chrome.runtime.sendMessage({
       type: 'SETTINGS_CHANGED',
       settings: {
-        breachThreshold: parseInt(breachThreshold) || 60,
-        warningThreshold: parseInt(warningThreshold) || 20,
+        breachThreshold: parsedBreach,
+        warningThreshold: parsedWarning,
         isMuted,
         volume: volume[0],
         soundType,
@@ -108,7 +135,7 @@ export function Popup() {
         refreshFrequency: parseInt(refreshFrequency) || 30,
       },
     }).catch(() => {})
-  }, [breachThreshold, warningThreshold, isMuted, volume, soundType, isDarkMode, breachColor, warningColor, refreshFrequency])
+  }, [breachThreshold, warningThreshold, isMuted, volume, soundType, isDarkMode, breachColor, warningColor, refreshFrequency, thresholdsValid])
 
   const handleReset = () => {
     console.log('[Popup] Reset button activated')
@@ -290,7 +317,12 @@ export function Popup() {
                         type="number"
                         value={breachThreshold}
                         onChange={handleBreachThresholdChange}
-                        className="flex-1 h-9 text-center text-sm border-0 bg-muted/50"
+                        aria-invalid={!breachValid || !thresholdsOrdered}
+                        className={`flex-1 h-9 text-center text-sm border bg-muted/50 ${
+                          !breachValid || !thresholdsOrdered
+                            ? 'border-red-500 ring-1 ring-red-500'
+                            : 'border-0'
+                        }`}
                         min="1"
                       />
                       <span className="text-xs text-muted-foreground">sec</span>
@@ -307,13 +339,26 @@ export function Popup() {
                         type="number"
                         value={warningThreshold}
                         onChange={handleWarningThresholdChange}
-                        className="flex-1 h-9 text-center text-sm border-0 bg-muted/50"
-                        min="1"
+                        aria-invalid={!warningValid || !thresholdsOrdered}
+                        className={`flex-1 h-9 text-center text-sm border bg-muted/50 ${
+                          !warningValid || !thresholdsOrdered
+                            ? 'border-red-500 ring-1 ring-red-500'
+                            : 'border-0'
+                        }`}
+                        min="0"
                       />
                       <span className="text-xs text-muted-foreground">sec</span>
                     </div>
                   </div>
                 </div>
+                {!thresholdsValid && (
+                  <p className="mt-3 text-xs text-red-500" role="alert">
+                    {!breachValid && 'Breach must be a positive number. '}
+                    {!warningValid && 'Warning must be 0 or greater. '}
+                    {breachValid && warningValid && !thresholdsOrdered &&
+                      'Warning must be less than breach.'}
+                  </p>
+                )}
               </section>
 
               {/* Section: Chat Refresh */}
