@@ -151,37 +151,100 @@ function cleanupRemovedRows(currentIds) {
   }
 }
 
-function playSound(soundType, volume) {
-  console.log('[Content] playSound core logic called', { soundType, volume });
-
+// Web Audio synthesis — produces distinct tones per sound type.
+function getAudioCtx() {
   if (!sharedAudioCtx) {
     sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
   }
-  const audioCtx = sharedAudioCtx;
+  if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume();
+  return sharedAudioCtx;
+}
 
-  if (audioCtx.state === 'suspended') {
-    audioCtx.resume();
+function playSound(soundType, volume) {
+  console.log('[Content] playSound called', { soundType, volume });
+  const ctx = getAudioCtx();
+  const t = ctx.currentTime;
+  const vol = Math.max(0, Math.min(100, volume)) / 100;
+
+  if (soundType === 'chime') {
+    // Two ascending sine notes (C5 → E5).
+    const o1 = ctx.createOscillator(), g1 = ctx.createGain();
+    o1.connect(g1); g1.connect(ctx.destination);
+    o1.type = 'sine'; o1.frequency.setValueAtTime(523.25, t);
+    g1.gain.setValueAtTime(0.0001, t);
+    g1.gain.exponentialRampToValueAtTime(vol * 0.3, t + 0.02);
+    g1.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+    o1.start(t); o1.stop(t + 0.22);
+
+    const o2 = ctx.createOscillator(), g2 = ctx.createGain();
+    o2.connect(g2); g2.connect(ctx.destination);
+    o2.type = 'sine'; o2.frequency.setValueAtTime(659.25, t + 0.15);
+    g2.gain.setValueAtTime(0.0001, t + 0.15);
+    g2.gain.exponentialRampToValueAtTime(vol * 0.3, t + 0.17);
+    g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.45);
+    o2.start(t + 0.15); o2.stop(t + 0.47);
+
+  } else if (soundType === 'alert') {
+    // Urgent sawtooth double-pulse at 660 Hz.
+    const o1 = ctx.createOscillator(), g1 = ctx.createGain();
+    o1.connect(g1); g1.connect(ctx.destination);
+    o1.type = 'sawtooth'; o1.frequency.setValueAtTime(660, t);
+    g1.gain.setValueAtTime(0.0001, t);
+    g1.gain.exponentialRampToValueAtTime(vol * 0.2, t + 0.01);
+    g1.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+    o1.start(t); o1.stop(t + 0.13);
+
+    const o2 = ctx.createOscillator(), g2 = ctx.createGain();
+    o2.connect(g2); g2.connect(ctx.destination);
+    o2.type = 'sawtooth'; o2.frequency.setValueAtTime(660, t + 0.16);
+    g2.gain.setValueAtTime(0.0001, t + 0.16);
+    g2.gain.exponentialRampToValueAtTime(vol * 0.2, t + 0.17);
+    g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
+    o2.start(t + 0.16); o2.stop(t + 0.3);
+
+  } else if (soundType === 'bell') {
+    // Sine fundamental (800 Hz) + quiet 3rd-harmonic overtone, long decay.
+    const o1 = ctx.createOscillator(), g1 = ctx.createGain();
+    o1.connect(g1); g1.connect(ctx.destination);
+    o1.type = 'sine'; o1.frequency.setValueAtTime(800, t);
+    g1.gain.setValueAtTime(0.0001, t);
+    g1.gain.exponentialRampToValueAtTime(vol * 0.3, t + 0.01);
+    g1.gain.exponentialRampToValueAtTime(0.0001, t + 0.6);
+    o1.start(t); o1.stop(t + 0.62);
+
+    const o2 = ctx.createOscillator(), g2 = ctx.createGain();
+    o2.connect(g2); g2.connect(ctx.destination);
+    o2.type = 'sine'; o2.frequency.setValueAtTime(2400, t);
+    g2.gain.setValueAtTime(0.0001, t);
+    g2.gain.exponentialRampToValueAtTime(vol * 0.1, t + 0.005);
+    g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
+    o2.start(t); o2.stop(t + 0.32);
+
+  } else if (soundType === 'notification') {
+    // Three quick ascending triangle notes (G5 → B5 → D6).
+    const notes = [783.99, 987.77, 1174.66];
+    notes.forEach((freq, i) => {
+      const off = i * 0.12;
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = 'triangle'; osc.frequency.setValueAtTime(freq, t + off);
+      gain.gain.setValueAtTime(0.0001, t + off);
+      gain.gain.exponentialRampToValueAtTime(vol * 0.3, t + off + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + off + 0.12);
+      osc.start(t + off); osc.stop(t + off + 0.14);
+    });
+
+  } else {
+    // Beep (default): single square-wave pulse at 880 Hz.
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.type = 'square'; osc.frequency.setValueAtTime(880, t);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(vol * 0.25, t + 0.02);
+    gain.gain.setValueAtTime(vol * 0.25, t + 0.18);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+    osc.start(t); osc.stop(t + 0.23);
   }
-
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-
-  osc.connect(gain);
-  gain.connect(audioCtx.destination);
-
-  osc.type = 'square';
-  osc.frequency.setValueAtTime(880, audioCtx.currentTime);
-
-  const safeVolume = Math.max(0, Math.min(100, volume));
-  const normalizedVolume = safeVolume / 100;
-
-  gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
-  gain.gain.exponentialRampToValueAtTime(normalizedVolume * 0.25, audioCtx.currentTime + 0.02);
-  gain.gain.setValueAtTime(normalizedVolume * 0.25, audioCtx.currentTime + 0.18);
-  gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.22);
-
-  osc.start();
-  osc.stop(audioCtx.currentTime + 0.23);
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {

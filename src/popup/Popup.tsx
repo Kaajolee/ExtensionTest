@@ -24,6 +24,7 @@ import {
   VolumeX,
   Play,
 } from "lucide-react"
+import { playSound } from "@/utils/sound"
 
 export function Popup() {
 
@@ -247,13 +248,8 @@ export function Popup() {
   }
 
   const handlePlaySound = () => {
-    console.log('[Popup] Play Sound button activated')
-    console.log('[Popup] Play Sound core logic: sending PLAY_SOUND message', { soundType, volume: volume[0] })
-    chrome.runtime.sendMessage({
-      type: 'PLAY_SOUND',
-      soundType,
-      volume: volume[0],
-    }).catch(() => {})
+    console.log('[Popup] Play Sound button activated', { soundType, volume: volume[0] })
+    playSound(soundType, volume[0])
   }
 
   const handleBreachThresholdBlur = (e: React.FocusEvent<HTMLInputElement>) => {

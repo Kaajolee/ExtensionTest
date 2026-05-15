@@ -9,7 +9,7 @@ const ENTRY_ID_PATTERN = /^[a-zA-Z0-9_\-#.]{1,64}$/;
 const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 
 // SECURITY: Allowed sound type values.
-const ALLOWED_SOUND_TYPES = new Set(['beep', 'chime', 'alert']);
+const ALLOWED_SOUND_TYPES = new Set(['beep', 'chime', 'alert', 'bell', 'notification']);
 
 
 const defaultSettings = {
