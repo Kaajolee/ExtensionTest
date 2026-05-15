@@ -12,7 +12,9 @@ const config = {
   entryIdPattern: /^[a-zA-Z0-9_\-#.]{1,64}$/,
 };
 
-let lastCandidates = new Set();
+// Per-entry timer metadata fed by SW UPDATE_ROWS - drives the local 1s tick.
+// Map<entryId, { detectedAt, breachThreshold, warningThreshold }>
+const timerMeta = new Map();
 
 let sharedAudioCtx = null;
 
@@ -89,23 +91,22 @@ function scanForUnassignedChats() {
     candidates.push({ entryId, source, row });
   });
 
-  const candidateIds = new Set(candidates.map(c => c.entryId));
-  if (JSON.stringify(Array.from(candidateIds).sort()) !== JSON.stringify(Array.from(lastCandidates).sort())) {
-    lastCandidates = candidateIds;
-
-    const scanData = candidates.map(c => ({ entryId: c.entryId, source: c.source }));
-    chrome.runtime.sendMessage({
-      type: 'SCAN_RESULT',
-      candidates: scanData,
-      timestamp: Date.now(),
-    }).catch((err) => {
-      console.error('[Content] Failed to send SCAN_RESULT message to service worker', err);
-    });
-  }
+  // Always send - SW needs every tick to fire breach sounds during stable queues.
+  // Visual countdown ticks locally regardless, see tickTimers().
+  const scanData = candidates.map(c => ({ entryId: c.entryId, source: c.source }));
+  chrome.runtime.sendMessage({
+    type: 'SCAN_RESULT',
+    candidates: scanData,
+    timestamp: Date.now(),
+  }).catch((err) => {
+    console.error('[Content] Failed to send SCAN_RESULT message to service worker', err);
+  });
 
   window.__chatTrackerRows = new Map(candidates.map(c => [c.entryId, c.row]));
 }
 
+// Apply SW snapshot - stores per-entry detectedAt + thresholds for local ticking.
+// Missing detectedAt means the SW dropped the entry; we clear it locally too.
 function applyRowAttributes(updates) {
   console.log('[Content] applyRowAttributes core logic called', { updateCount: Object.keys(updates).length });
   const rows = window.__chatTrackerRows || new Map();
@@ -114,29 +115,55 @@ function applyRowAttributes(updates) {
     const safeId = sanitizeEntryId(entryId);
     if (!safeId) return;
 
-    const row = rows.get(safeId);
-    if (!row) return;
-
-    if (attrs && typeof attrs === 'object') {
-      if (attrs.timer !== undefined && typeof attrs.timer === 'string') {
-        row.setAttribute('data-timer-text', attrs.timer);
-      } else {
+    if (attrs && typeof attrs === 'object' && typeof attrs.detectedAt === 'number') {
+      timerMeta.set(safeId, {
+        detectedAt: attrs.detectedAt,
+        breachThreshold: typeof attrs.breachThreshold === 'number' ? attrs.breachThreshold : 60,
+        warningThreshold: typeof attrs.warningThreshold === 'number' ? attrs.warningThreshold : 20,
+      });
+    } else {
+      // Dropped - clear local state and any lingering DOM attrs.
+      timerMeta.delete(safeId);
+      const row = rows.get(safeId);
+      if (row) {
         row.removeAttribute('data-timer-text');
-      }
-
-      if (attrs.warning === true) {
-        row.setAttribute('data-warning', 'true');
-      } else {
         row.removeAttribute('data-warning');
-      }
-
-      if (attrs.overdue === true) {
-        row.setAttribute('data-overdue', 'true');
-      } else {
         row.removeAttribute('data-overdue');
       }
     }
   });
+
+  // Render immediately so the user sees fresh values without waiting for the next tick.
+  tickTimers();
+}
+
+// Local 1s tick - computes countdown + warning/overdue from cached metadata.
+// Runs independently of SCAN_RESULT round-trips, so timers stay live.
+function tickTimers() {
+  const rows = window.__chatTrackerRows || new Map();
+  const now = Date.now();
+
+  for (const [entryId, meta] of timerMeta.entries()) {
+    const row = rows.get(entryId);
+    if (!row) {
+      // Row no longer in DOM-derived map - drop the stale meta entry.
+      timerMeta.delete(entryId);
+      continue;
+    }
+
+    const elapsed = (now - meta.detectedAt) / 1000;
+    const remaining = Math.max(0, Math.ceil(meta.breachThreshold - elapsed));
+    const isBreached = elapsed >= meta.breachThreshold;
+    const isWarning = !isBreached && elapsed >= meta.warningThreshold;
+
+    row.setAttribute('data-timer-text', remaining + 's');
+
+    if (isWarning) row.setAttribute('data-warning', 'true');
+    else row.removeAttribute('data-warning');
+
+    if (isBreached) row.setAttribute('data-overdue', 'true');
+    else row.removeAttribute('data-overdue');
+  }
 }
 
 function cleanupRemovedRows(currentIds) {
@@ -147,6 +174,7 @@ function cleanupRemovedRows(currentIds) {
       row.removeAttribute('data-timer-text');
       row.removeAttribute('data-warning');
       row.removeAttribute('data-overdue');
+      timerMeta.delete(entryId);
     }
   }
 }
@@ -331,6 +359,9 @@ function validateSelectors() {
 // Start scanning
 const scanIntervalId = setInterval(scanForUnassignedChats, config.scanInterval);
 
+// Visual timer tick - independent of SCAN_RESULT round-trips.
+const tickIntervalId = setInterval(tickTimers, 1000);
+
 // Initial scan
 scanForUnassignedChats();
 
@@ -340,6 +371,7 @@ validateSelectors();
 // Cleanup on unload
 window.addEventListener('unload', () => {
   clearInterval(scanIntervalId);
+  clearInterval(tickIntervalId);
 });
 
 console.log('[Chat Tracker] Content script loaded');

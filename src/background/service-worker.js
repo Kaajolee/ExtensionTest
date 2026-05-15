@@ -281,20 +281,20 @@ function processScan(candidates, timestamp) {
       activeWarnings++;
     }
 
-    const timer = Math.ceil(state.settings.breachThreshold - elapsedSeconds) + 's';
+    // Content script ticks the visual countdown locally - feed it the inputs it needs.
     rowUpdates[entryId] = {
-      timer,
-      warning: isWarning,
-      overdue: isBreached,
+      detectedAt: entry.detectedAt,
+      breachThreshold: state.settings.breachThreshold,
+      warningThreshold: state.settings.warningThreshold,
     };
   });
 
   // Drop entries no longer in the queue.
+  // Send an explicit "cleared" record (no detectedAt) so the content script clears local meta + DOM.
   for (const [id] of state.activeEntries) {
     if (!seenThisPass.has(id)) {
       state.activeEntries.delete(id);
-    } else if (!rowUpdates[id]) {
-      rowUpdates[id] = { timer: undefined, warning: false, overdue: false };
+      rowUpdates[id] = { cleared: true };
     }
   }
 
