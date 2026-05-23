@@ -17,6 +17,7 @@ const config = {
 const timerMeta = new Map();
 
 let sharedAudioCtx = null;
+let sidebarBadgeEl = null;
 
 function sanitizeEntryId(id) {
   if (typeof id !== 'string') return null;
@@ -164,6 +165,8 @@ function tickTimers() {
     if (isBreached) row.setAttribute('data-overdue', 'true');
     else row.removeAttribute('data-overdue');
   }
+
+  updateSidebarBadge();
 }
 
 function cleanupRemovedRows(currentIds) {
@@ -177,6 +180,85 @@ function cleanupRemovedRows(currentIds) {
       timerMeta.delete(entryId);
     }
   }
+}
+
+// ---- SIDEBAR BADGE ----
+// Reads the total queue count from Zendesk's own DOM counter (shows the true
+// total across all pages, not just the visible set).
+function readQueueTotal() {
+  const el = document.querySelector('[data-test-id="views_views-header-counter"]');
+  if (!el) return null;
+  const raw = (el.textContent || '').trim().replace(/\D/g, '');
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+// Injects a count badge as the first item in the left nav.
+// Safe to call repeatedly — bails early if badge is already in DOM.
+function injectSidebarBadge() {
+  const nav = document.querySelector('nav[data-test-id="support_nav"]');
+  if (!nav) return;
+  const ul = nav.querySelector('ul');
+  if (!ul) return;
+  // Already present check.
+  if (sidebarBadgeEl && nav.contains(sidebarBadgeEl)) return;
+
+  const li = document.createElement('li');
+  li.setAttribute('data-chat-monitor-badge', 'true');
+  li.style.cssText = [
+    'list-style:none',
+    'display:flex',
+    'flex-direction:column',
+    'align-items:center',
+    'justify-content:center',
+    'padding:8px 0 4px',
+    'gap:2px',
+    'cursor:default',
+    'user-select:none',
+  ].join(';');
+
+  const count = document.createElement('span');
+  count.setAttribute('data-chat-monitor-count', 'true');
+  count.style.cssText = [
+    'display:inline-flex',
+    'align-items:center',
+    'justify-content:center',
+    'min-width:24px',
+    'height:18px',
+    'padding:0 5px',
+    'border-radius:9px',
+    'background:#1f73b7',
+    'color:#fff',
+    'font:700 11px/1 system-ui,-apple-system,sans-serif',
+  ].join(';');
+  count.textContent = '—';
+
+  const label = document.createElement('span');
+  label.style.cssText = [
+    'font:500 9px/1 system-ui,-apple-system,sans-serif',
+    'color:#68737d',
+    'text-transform:uppercase',
+    'letter-spacing:0.4px',
+  ].join(';');
+  label.textContent = 'queue';
+
+  li.appendChild(count);
+  li.appendChild(label);
+  ul.insertBefore(li, ul.firstChild);
+  sidebarBadgeEl = li;
+  console.log('[Content] Sidebar queue badge injected');
+}
+
+// Called every tick — re-injects if Zendesk removed it (SPA re-renders).
+function updateSidebarBadge() {
+  if (!sidebarBadgeEl || !document.contains(sidebarBadgeEl)) {
+    injectSidebarBadge();
+    if (!sidebarBadgeEl) return;
+  }
+  const count = sidebarBadgeEl.querySelector('[data-chat-monitor-count]');
+  if (!count) return;
+  const total = readQueueTotal();
+  count.textContent = total !== null ? String(total) : '—';
 }
 
 // Web Audio synthesis — produces distinct tones per sound type.
@@ -301,6 +383,7 @@ const REQUIRED_SELECTORS = [
   { selector: 'div[data-test-id="status-badge-new"]',           label: 'status-badge-new'           },
   { selector: 'div[data-test-id="status-badge-open"]',          label: 'status-badge-open'          },
   { selector: 'td[data-test-id="ticket-table-cells-assignee"]', label: 'ticket-table-cells-assignee' },
+  { selector: 'nav[data-test-id="support_nav"]',                label: 'support_nav'                },
 ];
 
 function findMissingSelectors() {
@@ -364,6 +447,9 @@ const tickIntervalId = setInterval(tickTimers, 1000);
 
 // Initial scan
 scanForUnassignedChats();
+
+// Inject sidebar badge immediately; tickTimers() re-injects every second if SPA removes it.
+injectSidebarBadge();
 
 // Kick off the selector health check.
 validateSelectors();
