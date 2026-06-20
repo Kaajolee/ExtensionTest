@@ -37,9 +37,47 @@ const state = {
     warningCount: 0,
     totalHanging: 0,
   },
+  // Live (current-pass) counts of chats sitting in each zone right now.
+  // Distinct from metrics.breachedCount/warningCount, which are cumulative
+  // since the last reset. These drive the toolbar status light.
+  liveBreaches: 0,
+  liveWarnings: 0,
   runtimeAccumulatedMs: 0,
   sessionStartedAt: null,
 };
+
+// Toolbar status light ("bulb") shown on the extension icon's badge.
+// Green = all clear, yellow = at least one chat in the warning zone,
+// red = at least one breached, grey = monitoring disabled.
+const BADGE_GREEN = '#2e9e44';
+const BADGE_YELLOW = '#e6b800';
+const BADGE_RED = '#e53935';
+const BADGE_GREY = '#9aa0a6';
+// A glyph (not blank) is required for the badge to render at all; we paint
+// the text the same colour as the background so the result reads as a
+// solid coloured dot rather than a character.
+const BADGE_GLYPH = '●';
+
+function updateActionBadge() {
+  let color;
+  if (!state.settings.isEnabled) {
+    color = BADGE_GREY;
+  } else if (state.liveBreaches > 0) {
+    color = BADGE_RED;
+  } else if (state.liveWarnings > 0) {
+    color = BADGE_YELLOW;
+  } else {
+    color = BADGE_GREEN;
+  }
+  chrome.action.setBadgeText({ text: BADGE_GLYPH }).catch(() => {});
+  chrome.action.setBadgeBackgroundColor({ color }).catch(() => {});
+  // setBadgeTextColor is Chrome 110+. Matching it to the background hides
+  // the glyph for a clean solid light; older Chrome shows a white glyph,
+  // which still reads as a coloured status indicator.
+  if (chrome.action.setBadgeTextColor) {
+    chrome.action.setBadgeTextColor({ color }).catch(() => {});
+  }
+}
 
 const RUNTIME_HEARTBEAT_ALARM = 'runtime-heartbeat';
 const RUNTIME_HEARTBEAT_PERIOD_MIN = 1;
@@ -109,6 +147,10 @@ const stateReady = new Promise((resolve) => {
     });
   });
 });
+
+// Paint the initial status light once settings are known (green when
+// enabled with nothing breached/warning, grey when disabled).
+stateReady.then(updateActionBadge);
 
 // Flush in-memory delta to disk and re-anchor the tracking window.
 function flushRuntime() {
@@ -259,6 +301,10 @@ function processScan(candidates, timestamp) {
   console.log('[ServiceWorker] processScan core logic called', { candidateCount: candidates.length, timestamp });
   const seenThisPass = new Set();
   const rowUpdates = {};
+  // Live counts for this pass — recomputed from scratch every scan so the
+  // status light reflects the queue right now.
+  let liveBreaches = 0;
+  let liveWarnings = 0;
 
   candidates.forEach(({ entryId, source }) => {
     seenThisPass.add(entryId);
@@ -283,6 +329,7 @@ function processScan(candidates, timestamp) {
     const elapsedSeconds = (timestamp - entry.detectedAt) / 1000;
 
     if (elapsedSeconds >= state.settings.breachThreshold) {
+      liveBreaches++;
       if (!entry.alerted) {
         entry.alerted = true;
         if (!state.settings.isMuted) {
@@ -306,9 +353,12 @@ function processScan(candidates, timestamp) {
       // re-fire the sound. This replaces the blanket reset that used
       // to live in the SETTINGS_CHANGED handler.
       entry.alerted = false;
-      if (elapsedSeconds >= state.settings.warningThreshold && entry.countedTier === 0) {
-        entry.countedTier = 1;
-        state.metrics.warningCount++;
+      if (elapsedSeconds >= state.settings.warningThreshold) {
+        liveWarnings++;
+        if (entry.countedTier === 0) {
+          entry.countedTier = 1;
+          state.metrics.warningCount++;
+        }
       }
     }
 
@@ -332,6 +382,11 @@ function processScan(candidates, timestamp) {
   // breachedCount / warningCount are cumulative and incremented above;
   // do NOT overwrite them here. Only the live hanging total is recomputed.
   state.metrics.totalHanging = state.activeEntries.size;
+
+  // Refresh the toolbar status light from this pass's live counts.
+  state.liveBreaches = liveBreaches;
+  state.liveWarnings = liveWarnings;
+  updateActionBadge();
 
   // Popup is internal; silent-fail if not open.
   chrome.runtime.sendMessage({
@@ -413,18 +468,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendToActiveTrustedTab({ type: 'SET_ENABLED', enabled: state.settings.isEnabled });
 
     if (state.settings.isEnabled) {
-      // Re-evaluate all chats against the new thresholds.
+      // Re-evaluate all chats against the new thresholds (also refreshes
+      // the status light via processScan).
       const candidates = Array.from(state.activeEntries.entries()).map(([id, entry]) => ({
         entryId: id,
         source: entry.source,
       }));
       processScan(candidates, Date.now());
+    } else {
+      // Disabled: processScan won't run, so update the light to grey here.
+      updateActionBadge();
     }
     sendResponse({ ok: true });
   } else if (request.type === 'RESET') {
     console.log('[ServiceWorker] RESET message received');
     state.activeEntries.clear();
     state.metrics = { breachedCount: 0, warningCount: 0, totalHanging: 0 };
+    // No active chats -> status light back to green.
+    state.liveBreaches = 0;
+    state.liveWarnings = 0;
+    updateActionBadge();
 
     // Zero accumulated runtime and re-anchor the window; persist immediately.
     const now = Date.now();
