@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -53,10 +53,26 @@ export function Popup() {
   const [breachThreshold, setBreachThreshold] = useState("120")
   const [warningThreshold, setWarningThreshold] = useState("60")
 
+  // Last-known-valid threshold values. The blur handlers use these to
+  // restore the field when the user clicks away from a bad input
+  // ("abc", "", "0", etc.) instead of letting the bad text linger.
+  // A useEffect below keeps these in sync whenever the typed value is
+  // a usable positive integer.
+  const lastValidBreach = useRef("120")
+  const lastValidWarning = useRef("60")
+
   // Sound
   const [isMuted, setIsMuted] = useState(false)
   const [volume, setVolume] = useState([75])
   const [soundType, setSoundType] = useState("chime")
+
+  // Set true after the SW's REQUEST_CURRENT_STATE response has applied
+  // the stored settings. Gates the SETTINGS_CHANGED broadcast so the
+  // popup never sends its useState defaults — those don't match the
+  // SW's own defaults (e.g. popup defaults breach=120, SW defaults
+  // breach=60), and the resulting transient settings flip can clear
+  // an alerted-breached entry's flag and replay the breach sound.
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
 
   //#endregion------STATE VARIABLES AND DEFAULTS----------------
 
@@ -85,6 +101,9 @@ export function Popup() {
         setIsEnabled(s.isEnabled ?? true)
         setRefreshFrequency(s.refreshFrequency?.toString() || '30')
       }
+      // Mark loaded last so the broadcast useEffect runs exactly once
+      // with the post-load values, never with the useState defaults.
+      setSettingsLoaded(true)
     })
 
     // listens for state updates from the service worker
@@ -138,6 +157,22 @@ export function Popup() {
     const n = Number(value)
     return Number.isFinite(n) && n >= 0
   }
+
+  // Keep the "last valid" refs in lockstep with the current state. We
+  // only stash positive integers — empty, zero, and garbage are skipped
+  // so the blur handler always has a usable value to fall back to,
+  // including immediately after the initial settings load.
+  useEffect(() => {
+    if (breachThreshold !== "" && breachThreshold !== "0" && isValidNumber(breachThreshold)) {
+      lastValidBreach.current = breachThreshold
+    }
+  }, [breachThreshold])
+
+  useEffect(() => {
+    if (warningThreshold !== "" && warningThreshold !== "0" && isValidNumber(warningThreshold)) {
+      lastValidWarning.current = warningThreshold
+    }
+  }, [warningThreshold])
 
   type ValState = "valid" | "invalid" | "warning" | null
 
@@ -210,6 +245,17 @@ export function Popup() {
   }
 
   useEffect(() => {
+    // Block the broadcast until the SW's stored settings have been
+    // applied. Otherwise the initial useState defaults (breach=120,
+    // warning=60, volume=75, ...) would be pushed to the SW as a
+    // "settings change", momentarily overwriting the user's real
+    // values and causing processScan to re-evaluate alerted flags
+    // against the wrong thresholds — see the breach-sound-on-popup-open
+    // bug fix.
+    if (!settingsLoaded) {
+      console.log('[Popup] SETTINGS_CHANGED suppressed - settings not yet loaded')
+      return
+    }
     if (!thresholdsSendable) {
       console.log('[Popup] SETTINGS_CHANGED suppressed - invalid thresholds', {
         breachThreshold, warningThreshold,
@@ -231,7 +277,7 @@ export function Popup() {
         isEnabled,
       },
     }).catch(() => {})
-  }, [breachThreshold, warningThreshold, isMuted, volume, soundType, isDarkMode, breachColor, warningColor, refreshFrequency, isEnabled, thresholdsSendable])
+  }, [settingsLoaded, breachThreshold, warningThreshold, isMuted, volume, soundType, isDarkMode, breachColor, warningColor, refreshFrequency, isEnabled, thresholdsSendable])
 
 //#region------SETTINGS STATE CHANGE HANDLERS----------------
 
@@ -253,9 +299,15 @@ export function Popup() {
   }
 
   const handleBreachThresholdBlur = (e: React.FocusEvent<HTMLInputElement>) => {
-    if (e.target.value === "" || e.target.value === "0") {
-      console.log('[Popup] Breach Threshold blur snap to "2"')
-      setBreachThreshold("2")
+    // Revert to the last known valid value on any invalid input
+    // (non-numeric, negative, empty, "0") so the field can't be left
+    // in a broken state after click-away.
+    const value = e.target.value
+    if (value === "" || value === "0" || !isValidNumber(value)) {
+      console.log('[Popup] Breach Threshold blur revert to last valid', {
+        from: value, to: lastValidBreach.current,
+      })
+      setBreachThreshold(lastValidBreach.current)
     }
   }
 
@@ -278,9 +330,13 @@ export function Popup() {
   }
 
   const handleWarningThresholdBlur = (e: React.FocusEvent<HTMLInputElement>) => {
-    if (e.target.value === "" || e.target.value === "0") {
-      console.log('[Popup] Warning Threshold blur snap to "1"')
-      setWarningThreshold("1")
+    // Revert to the last known valid value on any invalid input.
+    const value = e.target.value
+    if (value === "" || value === "0" || !isValidNumber(value)) {
+      console.log('[Popup] Warning Threshold blur revert to last valid', {
+        from: value, to: lastValidWarning.current,
+      })
+      setWarningThreshold(lastValidWarning.current)
     }
   }
 
@@ -291,8 +347,13 @@ export function Popup() {
   }
 
   const handleRefreshFrequencyBlur = (e: React.FocusEvent<HTMLInputElement>) => {
-    if (e.target.value === "" || e.target.value === "0") {
-      console.log('[Popup] Refresh Frequency blur snap to "1"')
+    // Mirror the breach/warning blur pattern: anything the validator
+    // rejects (non-numeric, negative, etc.) plus the explicit empty/zero
+    // cases gets snapped back to "1" so the field can't be left in an
+    // invalid state on click-away.
+    const value = e.target.value
+    if (value === "" || value === "0" || !isValidNumber(value)) {
+      console.log('[Popup] Refresh Frequency blur snap to "1"', { from: value })
       setRefreshFrequency("1")
     }
   }

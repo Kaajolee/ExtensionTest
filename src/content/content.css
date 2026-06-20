@@ -1,9 +1,29 @@
-/* Chat Tracker - Content Script Styles */
+/* Chat Tracker - Content Script Styles
+ *
+ * Colors are CSS custom properties set by content.js on :root from
+ * settings broadcast by the service worker. The values below are only
+ * fallbacks for the brief window before the first UPDATE_ROWS arrives.
+ *
+ *   --ct-warning-color  solid hex for warning border + badge
+ *   --ct-breach-color   solid hex for overdue border + badge
+ *
+ * The translucent row backgrounds are derived via color-mix() so a
+ * single hex from the picker drives both the border and the wash.
+ */
+
+/* The row must be the containing block for the absolute-positioned
+   badge below — without this the badge floats out to the right of the
+   page since <tr>s aren't positioned by default. */
+tr[data-timer-text] {
+  position: relative;
+}
 
 tr[data-timer-text]::after {
   content: attr(data-timer-text);
   position: absolute;
-  right: 20px;
+  top: 50%;
+  right: 12px;
+  transform: translateY(-50%);
   background: #444;
   color: white;
   padding: 2px 8px;
@@ -11,26 +31,27 @@ tr[data-timer-text]::after {
   font-family: monospace;
   font-weight: bold;
   font-size: 14px;
+  line-height: 1;
   z-index: 10;
   pointer-events: none;
 }
 
 tr[data-warning="true"] {
-  background-color: rgba(255, 204, 0, 0.2) !important;
-  border-left: 6px solid #e6b800 !important;
+  background-color: color-mix(in srgb, var(--ct-warning-color, #e6b800) 20%, transparent) !important;
+  border-left: 6px solid var(--ct-warning-color, #e6b800) !important;
 }
 
 tr[data-warning="true"]::after {
-  background: #e6b800;
+  background: var(--ct-warning-color, #e6b800);
   color: #222;
 }
 
 tr[data-overdue="true"] {
-  background-color: rgba(255, 0, 0, 0.15) !important;
-  border-left: 6px solid red !important;
+  background-color: color-mix(in srgb, var(--ct-breach-color, #ff0000) 18%, transparent) !important;
+  border-left: 6px solid var(--ct-breach-color, #ff0000) !important;
 }
 
 tr[data-overdue="true"]::after {
-  background: red;
+  background: var(--ct-breach-color, #ff0000);
   color: white;
 }

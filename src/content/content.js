@@ -10,11 +10,18 @@ import './content.css'
 const config = {
   scanInterval: 1000, // 1 second
   entryIdPattern: /^[a-zA-Z0-9_\-#.]{1,64}$/,
+  hexColorPattern: /^#[0-9a-fA-F]{6}$/,
 };
 
 // Per-entry timer metadata fed by SW UPDATE_ROWS - drives the local 1s tick.
 // Map<entryId, { detectedAt, breachThreshold, warningThreshold }>
 const timerMeta = new Map();
+
+// Master on/off, driven by the popup's enable switch via the service
+// worker. Starts true; the SW corrects it on the first message if the
+// extension is actually disabled. When false the content script does no
+// scanning, no ticking, and paints nothing.
+let enabled = true;
 
 let sharedAudioCtx = null;
 
@@ -32,6 +39,29 @@ function isValidUpdateMessage(request) {
   if (!request || typeof request !== 'object') return false;
   if (!request.updates || typeof request.updates !== 'object') return false;
   return true;
+}
+
+// Validate + apply row colors. Hex-only — anything else is dropped so the
+// page can't smuggle arbitrary CSS values into our custom properties.
+// The CSS uses color-mix() to derive the translucent row background, so
+// one hex from the picker drives both the border/badge and the wash.
+let lastAppliedWarning = null;
+let lastAppliedBreach = null;
+function applyColors(colors) {
+  if (!colors || typeof colors !== 'object') return;
+  const root = document.documentElement;
+  if (typeof colors.warning === 'string' &&
+      config.hexColorPattern.test(colors.warning) &&
+      colors.warning !== lastAppliedWarning) {
+    root.style.setProperty('--ct-warning-color', colors.warning);
+    lastAppliedWarning = colors.warning;
+  }
+  if (typeof colors.breach === 'string' &&
+      config.hexColorPattern.test(colors.breach) &&
+      colors.breach !== lastAppliedBreach) {
+    root.style.setProperty('--ct-breach-color', colors.breach);
+    lastAppliedBreach = colors.breach;
+  }
 }
 
 function isValidPlaySoundMessage(request) {
@@ -59,6 +89,7 @@ function isRowUnassigned(row) {
 }
 
 function scanForUnassignedChats() {
+  if (!enabled) return; // Disabled: don't scan or notify the SW.
   console.log('[Content] scanForUnassignedChats core logic called');
   const newBadges = document.querySelectorAll('div[data-test-id="status-badge-new"]');
   const openBadges = document.querySelectorAll('div[data-test-id="status-badge-open"]');
@@ -140,6 +171,7 @@ function applyRowAttributes(updates) {
 // Local 1s tick - computes countdown + warning/overdue from cached metadata.
 // Runs independently of SCAN_RESULT round-trips, so timers stay live.
 function tickTimers() {
+  if (!enabled) return; // Disabled: don't repaint timers.
   const rows = window.__chatTrackerRows || new Map();
   const now = Date.now();
 
@@ -176,6 +208,31 @@ function cleanupRemovedRows(currentIds) {
       row.removeAttribute('data-overdue');
       timerMeta.delete(entryId);
     }
+  }
+}
+
+// Strip every visual indicator this script has added. Called when the
+// extension is switched off so the page returns to its untouched state.
+function teardownVisuals() {
+  const rows = window.__chatTrackerRows || new Map();
+  for (const [, row] of rows.entries()) {
+    row.removeAttribute('data-timer-text');
+    row.removeAttribute('data-warning');
+    row.removeAttribute('data-overdue');
+  }
+  window.__chatTrackerRows = new Map();
+  timerMeta.clear();
+}
+
+// Flip the master switch. Tearing down on disable is immediate; on
+// enable the next scan tick repopulates everything.
+function setEnabled(next) {
+  const val = next !== false;
+  if (val === enabled) return;
+  enabled = val;
+  console.log('[Content] setEnabled ->', enabled);
+  if (!enabled) {
+    teardownVisuals();
   }
 }
 
@@ -278,12 +335,21 @@ function playSound(soundType, volume) {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (!isTrustedSender(sender)) return;
 
-  if (request.type === 'UPDATE_ROWS') {
+  if (request.type === 'SET_ENABLED') {
+    console.log('[Content] SET_ENABLED message received', { enabled: request.enabled });
+    setEnabled(request.enabled);
+  } else if (request.type === 'UPDATE_ROWS') {
     if (!isValidUpdateMessage(request)) {
       console.warn('[Content] Rejected malformed UPDATE_ROWS message');
       return;
     }
+    // The SW stamps every UPDATE_ROWS with the current enabled state so a
+    // freshly-loaded content script self-corrects even if it missed the
+    // SET_ENABLED push.
+    if (typeof request.enabled === 'boolean') setEnabled(request.enabled);
+    if (!enabled) return; // Don't paint anything while disabled.
     console.log('[Content] UPDATE_ROWS message received', { updateCount: Object.keys(request.updates).length });
+    if (request.colors) applyColors(request.colors);
     applyRowAttributes(request.updates);
     cleanupRemovedRows(new Set(Object.keys(request.updates)));
   } else if (request.type === 'PLAY_SOUND') {

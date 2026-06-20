@@ -2,7 +2,11 @@
 // Manages chat state, timers, and threshold evaluation
 
 
-const TRUSTED_URL_PATTERN = /^https:\/\/[^/]+\.zendesk\.com\/agent\/filters\//i;
+// Allows real Zendesk subdomains over HTTPS, plus http://localhost:<port>
+// for the FakeZendesk simulator. The path prefix /agent/filters/ is
+// enforced for both so non-agent-view pages can't talk to the SW even
+// if they happen to be on a trusted origin.
+const TRUSTED_URL_PATTERN = /^(https:\/\/[^/]+\.zendesk\.com|http:\/\/localhost(:\d+)?)\/agent\/filters\//i;
 
 const ENTRY_ID_PATTERN = /^[a-zA-Z0-9_\-#.]{1,64}$/;
 
@@ -246,8 +250,6 @@ function broadcastSoundAlert(soundType, volume) {
 function processScan(candidates, timestamp) {
   console.log('[ServiceWorker] processScan core logic called', { candidateCount: candidates.length, timestamp });
   const seenThisPass = new Set();
-  let activeBreaches = 0;
-  let activeWarnings = 0;
   const rowUpdates = {};
 
   candidates.forEach(({ entryId, source }) => {
@@ -257,6 +259,14 @@ function processScan(candidates, timestamp) {
       state.activeEntries.set(entryId, {
         detectedAt: timestamp,
         alerted: false,
+        // High-watermark severity this chat has been tallied at:
+        //   0 = none, 1 = warning, 2 = breached.
+        // Each chat contributes to exactly ONE cumulative total — its
+        // highest tier reached. A chat that warns then breaches is moved
+        // out of the warning total into the breached total. The tier only
+        // ever climbs; only the Reset button (which clears all entries)
+        // starts the tally over.
+        countedTier: 0,
         source: source,
       });
     }
@@ -264,21 +274,34 @@ function processScan(candidates, timestamp) {
     const entry = state.activeEntries.get(entryId);
     const elapsedSeconds = (timestamp - entry.detectedAt) / 1000;
 
-    let isWarning = false;
-    let isBreached = false;
-
     if (elapsedSeconds >= state.settings.breachThreshold) {
-      isBreached = true;
-      activeBreaches++;
       if (!entry.alerted) {
         entry.alerted = true;
         if (!state.settings.isMuted) {
           broadcastSoundAlert(state.settings.soundType, state.settings.volume);
         }
       }
-    } else if (elapsedSeconds >= state.settings.warningThreshold) {
-      isWarning = true;
-      activeWarnings++;
+      // Promote to the breached bucket. If this chat was previously
+      // tallied as a warning, take it back out of the warning total so it
+      // only counts toward breached.
+      if (entry.countedTier < 2) {
+        if (entry.countedTier === 1) {
+          state.metrics.warningCount--;
+        }
+        entry.countedTier = 2;
+        state.metrics.breachedCount++;
+      }
+    } else {
+      // Entry is below the breach threshold. Clear `alerted` so that if
+      // the user later lowers the threshold (or the entry crosses back
+      // over for any other reason) we treat it as a fresh breach and
+      // re-fire the sound. This replaces the blanket reset that used
+      // to live in the SETTINGS_CHANGED handler.
+      entry.alerted = false;
+      if (elapsedSeconds >= state.settings.warningThreshold && entry.countedTier === 0) {
+        entry.countedTier = 1;
+        state.metrics.warningCount++;
+      }
     }
 
     // Content script ticks the visual countdown locally - feed it the inputs it needs.
@@ -298,8 +321,8 @@ function processScan(candidates, timestamp) {
     }
   }
 
-  state.metrics.breachedCount = activeBreaches;
-  state.metrics.warningCount = activeWarnings;
+  // breachedCount / warningCount are cumulative and incremented above;
+  // do NOT overwrite them here. Only the live hanging total is recomputed.
   state.metrics.totalHanging = state.activeEntries.size;
 
   // Popup is internal; silent-fail if not open.
@@ -311,6 +334,16 @@ function processScan(candidates, timestamp) {
   sendToActiveTrustedTab({
     type: 'UPDATE_ROWS',
     updates: rowUpdates,
+    // Piggyback the user's chosen colors so the content script can write
+    // them to CSS custom properties without an extra round-trip. Cheap
+    // (two short hex strings) and keeps row painting always in sync.
+    colors: {
+      warning: state.settings.warningColor,
+      breach: state.settings.breachColor,
+    },
+    // Stamp the master switch so a freshly-loaded content script that
+    // missed the SET_ENABLED push still self-corrects.
+    enabled: state.settings.isEnabled,
   });
 }
 
@@ -332,6 +365,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.type === 'SCAN_RESULT') {
     console.log('[ServiceWorker] SCAN_RESULT message received', { candidateCount: request.candidates?.length });
+    // Disabled: ignore the scan entirely and tell the content script to
+    // switch off (covers a content script that loaded while disabled).
+    if (!state.settings.isEnabled) {
+      sendToActiveTrustedTab({ type: 'SET_ENABLED', enabled: false });
+      sendResponse({ ok: true, disabled: true });
+      return;
+    }
     const safeCandidates = sanitizeCandidates(request.candidates);
     if (!safeCandidates) {
       sendResponse({ ok: false, error: 'invalid_candidates' });
@@ -349,17 +389,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       console.warn('[ServiceWorker] storage.local.set failed', err);
     });
 
-    // Reset alerted flags so new thresholds can re-trigger sounds.
-    state.activeEntries.forEach((entry) => {
-      entry.alerted = false;
-    });
+    // NOTE: we intentionally do NOT reset entry.alerted here. Toggling
+    // mute, changing sound type, swapping colours, etc. would otherwise
+    // re-fire the breach sound for every currently-overdue chat on
+    // every settings touch. processScan() now clears `alerted` on its
+    // own whenever an entry drops below the breach threshold, so a
+    // legitimate re-breach (e.g. user lowers the threshold below the
+    // current elapsed time after raising it above) still fires.
 
-    // Re-evaluate all chats against the new thresholds.
-    const candidates = Array.from(state.activeEntries.entries()).map(([id, entry]) => ({
-      entryId: id,
-      source: entry.source,
-    }));
-    processScan(candidates, Date.now());
+    // Push the master switch to the content script directly. This is the
+    // re-enable path too: a disabled content script has stopped sending
+    // SCAN_RESULT, so the SW must tell it to switch back on.
+    sendToActiveTrustedTab({ type: 'SET_ENABLED', enabled: state.settings.isEnabled });
+
+    if (state.settings.isEnabled) {
+      // Re-evaluate all chats against the new thresholds.
+      const candidates = Array.from(state.activeEntries.entries()).map(([id, entry]) => ({
+        entryId: id,
+        source: entry.source,
+      }));
+      processScan(candidates, Date.now());
+    }
     sendResponse({ ok: true });
   } else if (request.type === 'RESET') {
     console.log('[ServiceWorker] RESET message received');
