@@ -11,6 +11,7 @@ const config = {
   scanInterval: 1000, // 1 second
   entryIdPattern: /^[a-zA-Z0-9_\-#.]{1,64}$/,
   hexColorPattern: /^#[0-9a-fA-F]{6}$/,
+  refreshButtonSelector: 'button[data-test-id="views_views-list_header-refresh"]',
 };
 
 // Per-entry timer metadata fed by SW UPDATE_ROWS - drives the local 1s tick.
@@ -22,6 +23,17 @@ const timerMeta = new Map();
 // extension is actually disabled. When false the content script does no
 // scanning, no ticking, and paints nothing.
 let enabled = true;
+
+// Auto-refresh: periodically click Zendesk's "refresh view" button so the
+// queue data stays current. Cadence (seconds) comes from the popup's
+// refresh-frequency setting, delivered on UPDATE_ROWS.
+let refreshFrequencySec = 30;
+let refreshTimerId = null;
+
+// Watches the ticket-list container so we can instantly repaint badges
+// when a refresh rebuilds the rows (instead of waiting for the next scan).
+let rowObserver = null;
+let observedContainer = null;
 
 let sharedAudioCtx = null;
 
@@ -88,9 +100,10 @@ function isRowUnassigned(row) {
   return text === '' || text === '-' || text === '—' || /^(unassigned|-)$/i.test(text);
 }
 
-function scanForUnassignedChats() {
-  if (!enabled) return; // Disabled: don't scan or notify the SW.
-  console.log('[Content] scanForUnassignedChats core logic called');
+// Walk the current DOM and return the unassigned-chat rows as
+// [{ entryId, source, row }]. Shared by the SW-reporting scan and the
+// local repaint path so both see identical row identity.
+function collectCandidateRows() {
   const newBadges = document.querySelectorAll('div[data-test-id="status-badge-new"]');
   const openBadges = document.querySelectorAll('div[data-test-id="status-badge-open"]');
 
@@ -110,17 +123,20 @@ function scanForUnassignedChats() {
   });
 
   const candidates = [];
-  const currentCandidateIds = new Set();
-
   candidateRows.forEach((source, row) => {
-  
     const rawId = row.innerText.split('\n')[0].trim() || row.getAttribute('data-test-id');
     const entryId = sanitizeEntryId(rawId);
     if (!entryId) return; // Skip rows with invalid IDs
-
-    currentCandidateIds.add(entryId);
     candidates.push({ entryId, source, row });
   });
+
+  return candidates;
+}
+
+function scanForUnassignedChats() {
+  if (!enabled) return; // Disabled: don't scan or notify the SW.
+  console.log('[Content] scanForUnassignedChats core logic called');
+  const candidates = collectCandidateRows();
 
   // Always send - SW needs every tick to fire breach sounds during stable queues.
   // Visual countdown ticks locally regardless, see tickTimers().
@@ -134,6 +150,41 @@ function scanForUnassignedChats() {
   });
 
   window.__chatTrackerRows = new Map(candidates.map(c => [c.entryId, c.row]));
+
+  // Make sure we're watching the live row container for re-renders.
+  ensureRowObserver();
+}
+
+// Re-map row references to the freshly-rendered DOM and repaint badges
+// straight from the cached timerMeta — no SW round-trip. This is what
+// keeps the timers from blinking when a refresh (auto or manual) tears
+// down and rebuilds the ticket table: the per-entry timing data already
+// lives in timerMeta, only the element references went stale.
+function repaintFromCache() {
+  if (!enabled) return;
+  window.__chatTrackerRows = new Map(collectCandidateRows().map(c => [c.entryId, c.row]));
+  tickTimers();
+}
+
+// Attach a MutationObserver to the tbody holding the ticket rows. When a
+// refresh swaps the rows out (childList change), repaint immediately from
+// the cache. The observer callback runs as a microtask before the browser
+// paints, so the badges never visibly disappear. Re-targets itself if the
+// table re-mounts under a new tbody.
+function ensureRowObserver() {
+  const anyBadge = document.querySelector(
+    'div[data-test-id="status-badge-new"], div[data-test-id="status-badge-open"]'
+  );
+  const container = anyBadge ? anyBadge.closest('tbody') : null;
+  if (!container || (container === observedContainer && rowObserver)) return;
+
+  if (rowObserver) rowObserver.disconnect();
+  rowObserver = new MutationObserver(() => repaintFromCache());
+  // childList only (not subtree) so per-cell text updates don't trigger it —
+  // we only care about whole rows being added/removed/replaced.
+  rowObserver.observe(container, { childList: true });
+  observedContainer = container;
+  console.log('[Content] Row observer attached to ticket tbody');
 }
 
 // Apply SW snapshot - stores per-entry detectedAt + thresholds for local ticking.
@@ -234,6 +285,40 @@ function setEnabled(next) {
   if (!enabled) {
     teardownVisuals();
   }
+}
+
+// Click Zendesk's "refresh view" button so the ticket list reloads on a
+// fixed cadence. No-op while disabled or if the button isn't on the page.
+function clickRefreshButton() {
+  if (!enabled) return;
+  const btn = document.querySelector(config.refreshButtonSelector);
+  if (!btn) {
+    console.warn('[Content] Refresh button not found:', config.refreshButtonSelector);
+    return;
+  }
+  btn.click();
+  console.log('[Content] Auto-clicked view refresh button');
+}
+
+// (Re)arm the auto-refresh interval at the current cadence.
+function scheduleRefresh() {
+  if (refreshTimerId !== null) {
+    clearInterval(refreshTimerId);
+    refreshTimerId = null;
+  }
+  const ms = Math.max(1, refreshFrequencySec) * 1000;
+  refreshTimerId = setInterval(clickRefreshButton, ms);
+  console.log('[Content] Auto-refresh scheduled every', refreshFrequencySec, 's');
+}
+
+// Apply a new cadence from settings; only reschedules when it changes so
+// the countdown to the next refresh isn't reset on every UPDATE_ROWS.
+function setRefreshFrequency(sec) {
+  if (typeof sec !== 'number' || !isFinite(sec) || sec < 1) return;
+  const rounded = Math.round(sec);
+  if (rounded === refreshFrequencySec) return;
+  refreshFrequencySec = rounded;
+  scheduleRefresh();
 }
 
 // Web Audio synthesis — produces distinct tones per sound type.
@@ -350,6 +435,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (!enabled) return; // Don't paint anything while disabled.
     console.log('[Content] UPDATE_ROWS message received', { updateCount: Object.keys(request.updates).length });
     if (request.colors) applyColors(request.colors);
+    if (typeof request.refreshFrequency === 'number') setRefreshFrequency(request.refreshFrequency);
     applyRowAttributes(request.updates);
     cleanupRemovedRows(new Set(Object.keys(request.updates)));
   } else if (request.type === 'PLAY_SOUND') {
@@ -364,9 +450,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 //---------------SELECTORS AND THEIR IDS------------------------------------
 const REQUIRED_SELECTORS = [
-  { selector: 'div[data-test-id="status-badge-new"]',           label: 'status-badge-new'           },
-  { selector: 'div[data-test-id="status-badge-open"]',          label: 'status-badge-open'          },
-  { selector: 'td[data-test-id="ticket-table-cells-assignee"]', label: 'ticket-table-cells-assignee' },
+  { selector: 'div[data-test-id="status-badge-new"]',                  label: 'status-badge-new'            },
+  { selector: 'div[data-test-id="status-badge-open"]',                 label: 'status-badge-open'           },
+  { selector: 'td[data-test-id="ticket-table-cells-assignee"]',        label: 'ticket-table-cells-assignee' },
+  { selector: 'button[data-test-id="views_views-list_header-refresh"]', label: 'views-list-refresh'         },
 ];
 
 function findMissingSelectors() {
@@ -431,6 +518,9 @@ const tickIntervalId = setInterval(tickTimers, 1000);
 // Initial scan
 scanForUnassignedChats();
 
+// Arm the periodic view-refresh clicker (cadence updated from settings).
+scheduleRefresh();
+
 // Kick off the selector health check.
 validateSelectors();
 
@@ -438,6 +528,8 @@ validateSelectors();
 window.addEventListener('unload', () => {
   clearInterval(scanIntervalId);
   clearInterval(tickIntervalId);
+  if (refreshTimerId !== null) clearInterval(refreshTimerId);
+  if (rowObserver) rowObserver.disconnect();
 });
 
 console.log('[Chat Tracker] Content script loaded');

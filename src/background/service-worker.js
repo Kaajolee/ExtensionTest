@@ -231,7 +231,15 @@ function sendToActiveTrustedTab(payload) {
     const url = tab.url || '';
     if (!TRUSTED_URL_PATTERN.test(url)) return;
     chrome.tabs.sendMessage(tab.id, payload).catch((err) => {
-      console.error('[ServiceWorker] Failed to send', payload.type, 'to content script', err);
+      const msg = (err && err.message) || String(err);
+      // Benign + expected: the matching tab has no content script yet
+      // (e.g. it hasn't been reloaded since the extension last started, or
+      // is still loading). Settings are persisted regardless and the
+      // content script syncs to current state on its next scan once live.
+      if (/Receiving end does not exist|Could not establish connection/i.test(msg)) {
+        return;
+      }
+      console.warn('[ServiceWorker] Failed to send', payload.type, 'to content script:', msg);
     });
   });
 }
@@ -344,6 +352,8 @@ function processScan(candidates, timestamp) {
     // Stamp the master switch so a freshly-loaded content script that
     // missed the SET_ENABLED push still self-corrects.
     enabled: state.settings.isEnabled,
+    // Drive the content script's auto-refresh cadence (seconds).
+    refreshFrequency: state.settings.refreshFrequency,
   });
 }
 
