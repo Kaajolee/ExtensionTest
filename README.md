@@ -185,10 +185,9 @@ wall-clock time:
 ## Security
 
 - **Strict CSP** — `script-src 'self'; object-src 'self'; base-uri 'self'; frame-ancestors 'none'`
-- **Host restriction** — `https://*.zendesk.com/agent/filters/*` (plus
-  `http://localhost/agent/filters/*` for the local simulator; see
-  [Local testing](#local-testing)), enforced at both manifest and runtime.
-  Every message's sender URL is re-validated against `TRUSTED_URL_PATTERN`.
+- **Host restriction** — `https://*.zendesk.com/agent/filters/*` only,
+  enforced at both manifest and runtime. Every message's sender URL is
+  re-validated against `TRUSTED_URL_PATTERN`.
 - **Input sanitization** — All settings clamped/validated via
   `sanitizeSettings()`. Entry IDs validated against
   `/^[a-zA-Z0-9_\-#.]{1,64}$/`. Hex colors and sound types validated
@@ -214,8 +213,7 @@ wall-clock time:
 
 The toolbar status light uses the `chrome.action` badge API, which needs
 no extra permission. Host permissions:
-`https://*.zendesk.com/agent/filters/*` (and `http://localhost/agent/filters/*`
-for local testing).
+`https://*.zendesk.com/agent/filters/*` only.
 
 ## Tech Stack
 
@@ -289,19 +287,6 @@ To load it in Chrome:
 > **After reloading the extension, reload any open Zendesk tab.** Chrome
 > does not re-inject content scripts into already-open tabs, so the page
 > needs a refresh for the new content script to run.
-
-## Local testing
-
-The manifest also matches `http://localhost/agent/filters/*` so the
-extension can be exercised against a local page that mirrors Zendesk's
-`data-test-id` selectors (status badges, assignee cell, total counter,
-sidebar nav, and the view-refresh button) without touching production
-Zendesk. The service worker's `TRUSTED_URL_PATTERN` likewise allows
-`http://localhost` (any port) under `/agent/filters/`.
-
-> These localhost entries are for local development only. Remove them from
-> `manifest.json` and `TRUSTED_URL_PATTERN` before shipping a production
-> build.
 
 ## Debugging
 
