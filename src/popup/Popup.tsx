@@ -23,6 +23,8 @@ import {
   Volume2,
   VolumeX,
   Play,
+  Bell,
+  BellOff,
 } from "lucide-react"
 import { playSound } from "@/utils/sound"
 
@@ -66,6 +68,9 @@ export function Popup() {
   const [volume, setVolume] = useState([75])
   const [soundType, setSoundType] = useState("chime")
 
+  // Notifications
+  const [notificationsEnabled, setNotificationsEnabled] = useState(true)
+
   // Set true after the SW's REQUEST_CURRENT_STATE response has applied
   // the stored settings. Gates the SETTINGS_CHANGED broadcast so the
   // popup never sends its useState defaults — those don't match the
@@ -100,6 +105,7 @@ export function Popup() {
         setWarningColor(s.warningColor ?? '#f59e0b')
         setIsEnabled(s.isEnabled ?? true)
         setRefreshFrequency(s.refreshFrequency?.toString() || '30')
+        setNotificationsEnabled(s.notificationsEnabled ?? true)
       }
       // Mark loaded last so the broadcast useEffect runs exactly once
       // with the post-load values, never with the useState defaults.
@@ -275,9 +281,10 @@ export function Popup() {
         warningColor,
         refreshFrequency: parseInt(refreshFrequency, 10) || 30,
         isEnabled,
+        notificationsEnabled,
       },
     }).catch(() => {})
-  }, [settingsLoaded, breachThreshold, warningThreshold, isMuted, volume, soundType, isDarkMode, breachColor, warningColor, refreshFrequency, isEnabled, thresholdsSendable])
+  }, [settingsLoaded, breachThreshold, warningThreshold, isMuted, volume, soundType, isDarkMode, breachColor, warningColor, refreshFrequency, isEnabled, notificationsEnabled, thresholdsSendable])
 
 //#region------SETTINGS STATE CHANGE HANDLERS----------------
 
@@ -362,6 +369,12 @@ export function Popup() {
     console.log('[Popup] Mute switch activated', { checked })
     setIsMuted(checked)
     console.log('[Popup] Mute core logic: state updated to', checked)
+  }
+
+  const handleNotificationsChange = (checked: boolean) => {
+    console.log('[Popup] Notifications switch activated', { checked })
+    setNotificationsEnabled(checked)
+    console.log('[Popup] Notifications core logic: state updated to', checked)
   }
 
   const handleVolumeChange = (newVolume: number[]) => {
@@ -594,7 +607,7 @@ export function Popup() {
                 {/* Section: Sound */}
                 <section className="rounded-xl border border-border bg-card p-4">
                   <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-4">
-                    Sound
+                    Feedback
                   </h2>
                   <div className="space-y-5">
                     {/* Mute Toggle */}
@@ -615,12 +628,8 @@ export function Popup() {
                       <Switch checked={isMuted} onCheckedChange={handleMuteChange} />
                     </div>
 
-                    {/* Sound controls - blur when muted */}
-                    <div
-                      className={`space-y-5 transition-all duration-300 ${
-                        isMuted ? "blur-sm opacity-50 pointer-events-none" : ""
-                      }`}
-                    >
+                    {/* Sound controls */}
+                    <div className="space-y-5">
                       {/* Volume Slider */}
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">
@@ -659,12 +668,29 @@ export function Popup() {
                             size="icon"
                             onClick={handlePlaySound}
                             className="h-9 w-9 shrink-0"
-                            disabled={isMuted}
                           >
                             <Play className="h-4 w-4" />
                           </Button>
                         </div>
                       </div>
+                    </div>
+
+                    {/* Desktop Notifications Toggle */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        {notificationsEnabled ? (
+                          <Bell className="h-4 w-4 text-muted-foreground" />
+                        ) : (
+                          <BellOff className="h-4 w-4 text-muted-foreground" />
+                        )}
+                        <div>
+                          <Label className="text-sm font-medium">Warning Notifications</Label>
+                          <p className="text-xs text-muted-foreground">
+                            Desktop alert when a chat enters the warning zone
+                          </p>
+                        </div>
+                      </div>
+                      <Switch checked={notificationsEnabled} onCheckedChange={handleNotificationsChange} />
                     </div>
                   </div>
                 </section>

@@ -27,6 +27,7 @@ const defaultSettings = {
   warningColor: '#ffcc00',
   isEnabled: true,
   refreshFrequency: 30,
+  notificationsEnabled: true,
 };
 
 const state = {
@@ -258,6 +259,8 @@ function sanitizeSettings(raw) {
   out.isEnabled = raw.isEnabled === false ? false : true;
   // 1..3600s - 0 would peg CPU, >1h is meaningless.
   out.refreshFrequency = clampNumber(raw.refreshFrequency, 1, 3600, defaultSettings.refreshFrequency);
+  // Default = on (only explicit `false` disables warning-zone notifications).
+  out.notificationsEnabled = raw.notificationsEnabled === false ? false : true;
   return out;
 }
 
@@ -297,6 +300,27 @@ function broadcastSoundAlert(soundType, volume) {
   });
 }
 
+// Fire a desktop notification when one or more chats first enter the
+// warning zone. Multiple in the same scan pass are collapsed into one
+// toast so a threshold change can't spawn a flood of notifications.
+function notifyWarningEntered(entryIds) {
+  const count = entryIds.length;
+  const message = count === 1
+    ? `Chat ${entryIds[0]} has entered the warning zone.`
+    : `${count} chats have entered the warning zone.`;
+  chrome.notifications.create(`warning-${Date.now()}`, {
+    type: 'basic',
+    iconUrl: chrome.runtime.getURL('icon-light-32x32.png'),
+    title: 'Chat Monitor — Warning',
+    message,
+    priority: 1,
+  }, () => {
+    if (chrome.runtime.lastError) {
+      console.warn('[ServiceWorker] notification failed:', chrome.runtime.lastError.message);
+    }
+  });
+}
+
 function processScan(candidates, timestamp) {
   console.log('[ServiceWorker] processScan core logic called', { candidateCount: candidates.length, timestamp });
   const seenThisPass = new Set();
@@ -305,6 +329,9 @@ function processScan(candidates, timestamp) {
   // status light reflects the queue right now.
   let liveBreaches = 0;
   let liveWarnings = 0;
+  // Entry IDs that crossed into the warning zone for the first time this
+  // pass — used to fire a desktop notification once they've all been seen.
+  const newlyWarned = [];
 
   candidates.forEach(({ entryId, source }) => {
     seenThisPass.add(entryId);
@@ -358,6 +385,8 @@ function processScan(candidates, timestamp) {
         if (entry.countedTier === 0) {
           entry.countedTier = 1;
           state.metrics.warningCount++;
+          // First time this chat reached the warning zone -> notify.
+          newlyWarned.push(entryId);
         }
       }
     }
@@ -387,6 +416,12 @@ function processScan(candidates, timestamp) {
   state.liveBreaches = liveBreaches;
   state.liveWarnings = liveWarnings;
   updateActionBadge();
+
+  // Desktop notification for chats that just entered the warning zone
+  // (only when the user has notifications enabled).
+  if (newlyWarned.length > 0 && state.settings.notificationsEnabled) {
+    notifyWarningEntered(newlyWarned);
+  }
 
   // Popup is internal; silent-fail if not open.
   chrome.runtime.sendMessage({

@@ -3,7 +3,7 @@
   "name": "Chat Monitor",
   "version": "1.0.0",
   "description": "Chrome extension for monitoring chat response times.",
-  "permissions": ["scripting", "activeTab", "tabs", "storage", "alarms"],
+  "permissions": ["scripting", "activeTab", "tabs", "storage", "alarms", "notifications"],
   "host_permissions": ["https://*.zendesk.com/agent/filters/*", "http://localhost/agent/filters/*"],
   "action": {
     "default_popup": "popup.html",
