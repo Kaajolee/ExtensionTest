@@ -21,6 +21,10 @@ on the toolbar icon, and automatic queue refreshing.
 - **5 distinct audio alerts** — Beep, chime, alert, bell, and notification
   sounds, each with its own waveform and envelope. Volume is fully
   controllable from the popup, and the test button plays locally.
+- **Desktop notifications** — A Chrome notification fires the moment a
+  chat first enters the warning zone (once per chat, and aggregated into
+  one toast if several cross in the same scan). Toggleable from the popup
+  and independent of the sound mute.
 - **Automatic queue refresh** — Periodically clicks Zendesk's
   "refresh view" button on a configurable cadence (default 30s) so the
   ticket list stays current without manual refreshing.
@@ -166,6 +170,21 @@ The **live** counts that drive the toolbar status light are tracked
 separately (`state.liveBreaches` / `liveWarnings`), recomputed from scratch
 each scan so the light always reflects the queue right now.
 
+### Desktop Notifications
+
+The service worker fires a `chrome.notifications` toast the first time a
+chat reaches the warning zone (the `countedTier 0 → 1` transition in
+`processScan`). It is:
+
+- **once per chat** — the high-watermark tier prevents re-firing;
+- **aggregated per scan pass** — if several chats cross at once (e.g. you
+  lower the warning threshold), they collapse into a single
+  "N chats..." toast instead of a flood;
+- **independent of the sound mute** — muting only silences breach audio;
+- **gated by a popup toggle** — the `notificationsEnabled` setting (on by
+  default) is delivered via `SETTINGS_CHANGED` and checked before any
+  toast is shown. Disabling monitoring entirely also stops notifications.
+
 ### Runtime Timer Accounting
 
 The popup's runtime display tracks only browser-open time, not
@@ -210,6 +229,7 @@ wall-clock time:
 | `tabs` | Find the active Zendesk tab to broadcast `UPDATE_ROWS` / `SET_ENABLED` / `PLAY_SOUND` |
 | `storage` | Persist settings and runtime accumulator |
 | `alarms` | 1-minute heartbeat to flush runtime delta |
+| `notifications` | Desktop toast when a chat enters the warning zone |
 
 The toolbar status light uses the `chrome.action` badge API, which needs
 no extra permission. Host permissions:
@@ -225,7 +245,8 @@ no extra permission. Host permissions:
 - **lucide-react** — Icon set
 - **Web Audio API** — Sound synthesis (no audio files shipped)
 - **Chrome Extension APIs** — Manifest V3 (`chrome.runtime`,
-  `chrome.storage`, `chrome.alarms`, `chrome.tabs`, `chrome.action`)
+  `chrome.storage`, `chrome.alarms`, `chrome.tabs`, `chrome.action`,
+  `chrome.notifications`)
 
 ## Project Structure
 
@@ -253,9 +274,7 @@ ExtensionTest/
 ├── popup.html                     # Popup root
 ├── vite.config.ts                 # 3-entry-point build
 ├── tsconfig.json
-├── package.json
-├── SLA_Timer_Implementation_Report.html  # Audit implementation report
-└── SLA_Timer_Implementation_Report.pdf
+└── package.json
 ```
 
 ## Build & Install
@@ -300,9 +319,3 @@ Log messages reference only message types and aggregate counts — no
 ticket IDs or user data are logged. Sending a message to a tab that has no
 content script yet (e.g. a tab not reloaded after an extension restart) is
 treated as the expected, benign condition it is and does not log an error.
-
-## Audit Implementation Report
-
-A full report mapping the original 12-finding security audit to its
-implementation in this codebase is included as
-`SLA_Timer_Implementation_Report.pdf` (and the source HTML for editing).
